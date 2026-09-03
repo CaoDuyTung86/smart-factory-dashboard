@@ -1,129 +1,156 @@
-# 🏭 Smart Factory Ultra Edition — Industrial IoT & SCADA/MES Platform
+# 🏭 Smart Factory Dashboard — Web SCADA / MES cho dây chuyền SMT
 
-> **Hệ Thống Giám Sát & Điều Hành Sản Xuất Thông Minh Thời Gian Thực (Real-time Industrial IoT, Digital Twin, Camera Vision AOI & PLC Diagnostics)**
+> Dashboard giám sát sản xuất thời gian thực, mô phỏng một dây chuyền lắp ráp
+> bo mạch SMT — kèm hạ tầng IIoT chạy được thật: PLC mềm OpenPLC, Modbus TCP,
+> MQTT Unified Namespace.
 
-![License](https://img.shields.io/badge/License-MIT-blue.svg)
 ![React](https://img.shields.io/badge/React-19-61DAFB?logo=react)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?logo=typescript)
-![Vite](https://img.shields.io/badge/Vite-6.x-646CFF?logo=vite)
+![Vite](https://img.shields.io/badge/Vite-8.x-646CFF?logo=vite)
 ![TailwindCSS](https://img.shields.io/badge/TailwindCSS-4.x-38B2AC?logo=tailwindcss)
+![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
 ---
 
-## 📌 Giới Thiệu Dự Án
+## Dự án này là gì (và chưa là gì)
 
-**Smart Factory Ultra Edition** là một nền tảng Web SCADA / MES công nghiệp hiện đại, mô phỏng toàn diện hoạt động của dây chuyền sản xuất tự động hóa SMT (Surface Mount Technology) và lắp ráp linh kiện điện tử cao cấp (dựa trên trải nghiệm thực tế tại nhà máy sản xuất linh kiện điện tử Fukang Technology - Tập đoàn Foxconn).
+Đây là **bài tập mô phỏng**, xuất phát từ thời gian thực tập kỹ thuật tự động
+hoá tại nhà máy sản xuất linh kiện điện tử, viết lại bằng góc nhìn kỹ thuật
+phần mềm. Nói rõ ngay để không ai kỳ vọng nhầm:
 
-Hệ thống cho phép kỹ sư và quản lý nhà máy theo dõi dữ liệu cảm biến thời gian thực, trực quan hóa bản sao số 2D/3D (Digital Twin), soi lỗi linh kiện bằng Camera Vision AOI, kiểm tra trạng thái I/O & sơ đồ thang PLC Siemens S7-1200, và truy xuất nguồn gốc sản phẩm theo chuỗi thời gian.
+| Thành phần | Trạng thái |
+|---|---|
+| Tab **PLC S7-1200 & Ladder** | **Thật** — chương trình IEC 61131-3 chạy trên OpenPLC, đọc/ghi qua Modbus TCP, khi có hạ tầng ở [`infra/`](infra/). Không có hạ tầng thì tự chuyển sang mô phỏng cùng logic. |
+| Tab **SCADA Command Center** | Mô phỏng — dữ liệu cảm biến sinh trong trình duyệt, nhưng OEE tính đúng công thức Nakajima/SEMI E10. |
+| Tab **Digital Twin** | Mô phỏng — chuyển động băng tải, hành trình servo, actuator khí nén. |
+| Tab **Vision AOI** | Mô phỏng — bounding box và điểm khớp cố định. Chưa có thuật toán thị giác thật. |
+| Tab **MES Traceability** | Mô phỏng — timeline một lô hàng mẫu, xuất được CSV. |
+| Lưu trữ dữ liệu | **Chưa có** — refresh trang là mất. Time-series DB nằm ở giai đoạn 3. |
 
----
-
-## 🌟 Các Tính Năng Nổi Bật
-
-### 1. 📊 SCADA Command Center (Trung Tâm Điều Hành Real-time)
-- **Real-time Telemetry:** Giám sát dòng dữ liệu Nhiệt độ (°C), Độ rung (mm/s), Sản lượng, và Phế phẩm cập nhật mỗi 1.5 giây.
-- **Chỉ số OEE Quốc tế:** Tự động tính toán 4 chỉ số hiệu suất nhà máy: *Availability (Độ khả dụng), Performance (Hiệu suất), Quality (Chất lượng)* và *Overall OEE Score*.
-- **Alarm Management System:** Phát hiện vượt ngưỡng an toàn tự động, phát cảnh báo đỏ và hỗ trợ xác nhận xử lý sự cố (*Acknowledge*).
-- **Fault Injection Console:** Bảng điều khiển giả lập cố tình tạo lỗi (*Quá nhiệt SMT, Rung lắc CNC, Dừng khẩn cấp E-Stop, Khôi phục hệ thống*) để thử nghiệm khả năng ứng phó sự cố.
-
-### 2. 🎬 2D/3D Digital Twin Assembly Line (Bản Sao Số Dây Chuyền SMT)
-- Mô phỏng băng tải 2D/3D chạy động của bo mạch PCB di chuyển qua 5 trạm máy: *Loader ➔ In kem hàn ➔ Gắn chip SMT ➔ Lò nung Reflow ➔ Kiểm tra AOI ➔ Unloader*.
-- **Station Hardware Inspector:** Xem trực tiếp vị trí hành trình Robot Servo trục X/Y/Z (mm), trạng thái xi lanh khí nén (*Pneumatic Cylinder Extended/Retracted*) và đầu hút chân không (*Vacuum Nozzle*).
-
-### 3. 👁️ Camera Vision & AOI Defect Inspector (Thị Giác Máy Tính Công Nghiệp)
-- Màn hình mô phỏng máy kiểm tra quang học tự động **Cognex VisionPro / Halcon**:
-- Tự động soi bo mạch PCB và vẽ khung **Bounding Box** xanh (OK) / đỏ (NG):
-  - *Chip IC-U1:* **OK (99.8% confidence)**.
-  - *Resistor R12:* 🔴 **NG - Component Misaligned (Lệch chân 12°)**.
-  - *Solder Pin 8-12:* 🔴 **NG - Solder Bridge (Dính thiếc ngắn mạch)**.
-- Quét mã QR Serial bo mạch và kiểm tra độ lệch góc Mark Alignment ($\theta$).
-
-### 4. ⚡ PLC Siemens SIMATIC S7-1200 & Ladder Logic Diagnostics
-- Mô phỏng cấu trúc phần cứng **PLC Rack Siemens S7-1200** (CPU 1212C + Module DI/DO + Module Analog AI 4x13BIT chuẩn TIA Portal V16).
-- **Bảng đèn LED I/O Real-time:** Đèn tín hiệu nhấp nháy theo công tắc đầu vào và đầu ra.
-- **Interactive Ladder Diagram Viewer (Sơ Đồ Thang Chạy Động):** Trực quan hóa dòng điện chạy qua các tiếp điểm Ladder (Normally Open/Closed). Thao tác bấm nút *E-Stop* hoặc *Mở cửa an toàn* sẽ ngắt dòng điện và kích hoạt tháp đèn đỏ báo lỗi tức thì!
-
-### 5. 📦 MES Product Traceability System (Truy Xuất Nguồn Gốc Bo Mạch)
-- Tra cứu mã Barcode / QR Code bo mạch (VD: `FOX-APPLE-M3-90821`).
-- Hiển thị **Vòng đời bo mạch (Lifecycle Timeline)** từ lúc vào xưởng đến khi ra lò.
-- Xuất báo cáo sản xuất lô hàng dạng file CSV/JSON.
+Lộ trình đưa các phần còn lại về "thật" nằm trong [PROJECT_STATUS.md](PROJECT_STATUS.md).
 
 ---
 
-## 🛠️ Công Nghệ & Ngôn Ngữ Sử Dụng
+## Chạy dashboard
 
-| Thành phần | Công nghệ / Thư viện | Vai trò |
-|---|---|---|
-| **Ngôn ngữ chính** | **TypeScript 5.x** | Đảm bảo tính chặt chẽ về dữ liệu (Type Safety), quản lý State thời gian thực, ngăn ngừa lỗi rò rỉ bộ nhớ. |
-| **Giao diện & Framework** | **React 19** + **Vite 8** | Xây dựng UI linh hoạt, Render tốc độ cao 60 FPS, Hot Module Replacement (HMR) mượt mà. |
-| **Styling & Theme** | **TailwindCSS 4** + **Shadcn UI** | Cung cấp Design System đẳng cấp Enterprise, hỗ trợ Dark/Light Mode rực rỡ. |
-| **Data Visualization** | **Recharts** + **Canvas / SVG** | Vẽ biểu đồ biến thiên telemetry theo thời gian thực & render sơ đồ Digital Twin. |
-| **Routing** | **TanStack Router** | Điều hướng file-based routing type-safe cho 5 Module công nghiệp. |
-| **Icons & Assets** | **Lucide React** | Bộ biểu tượng chuẩn giao diện điều khiển công nghiệp SCADA. |
+```bash
+pnpm install
+pnpm dev
+```
 
----
+Mở `http://localhost:3000`. Không cần backend, không cần Docker — dashboard tự
+sinh dữ liệu mô phỏng.
 
-## ❓ Phân Tích: Ngôn Ngữ & Tech Stack Có Phù Hợp & Tối Ưu Nhất Không?
+## Chạy kèm PLC thật
 
-### 👉 CÂU TRẢ LỜI: RẤT PHÙ HỢP VÀ TỐI ƯU TUYỆT ĐỐI CHO LỚP WEB SCADA/MES!
+```bash
+docker compose -f infra/docker-compose.yml up -d --build
+bash infra/load-program.sh
+echo "VITE_PLC_GATEWAY_URL=http://localhost:8000" > .env.local
+pnpm dev
+```
 
-#### 1. Tại sao là TypeScript mà không phải JavaScript thuần?
-- Trong công nghiệp IoT/SCADA, dữ liệu cảm biến (Nhiệt độ, Độ rung, Điện áp, Trạng thái Relay/I-O) có cấu trúc vô cùng chặt chẽ.
-- **TypeScript** giúp định nghĩa các strict interface (`Machine`, `PlcIoState`, `AlarmEvent`, `VisionInspectionRecord`). Nhờ đó ngăn chặn 100% lỗi runtime phổ biến như `NullPointerException` hay đọc phải giá trị `undefined/NaN` — yếu tố sinh tử trong các ứng dụng điều khiển công nghiệp.
-
-#### 2. Tại sao lại là Web-based (React + Vite + TailwindCSS) thay vì ứng dụng Desktop truyền thống (C# WinForms / C++ WPF / WinCC)?
-- **Truy cập đa nền tảng (Cross-Platform):** Các phần mềm SCADA truyền thống (như WinCC, Wonderware) đòi hỏi cài đặt phức tạp trên máy tính Windows. Với Web SCADA (React/TypeScript), kỹ sư và giám đốc có thể mở trang web giám sát nhà máy ở bất kỳ đâu trên Máy tính, Máy tính bảng (iPad) hay Điện thoại di động.
-- **Tốc độ Render & Đồ họa WebGL/Canvas:** Công nghệ Web hiện đại hỗ trợ SVG/Canvas render 60fps mượt mà, giúp dựng bản sao số (Digital Twin) trực quan mà không cần đầu tư máy tính chuyên dụng đắt đỏ.
-- **Dễ dàng tích hợp Cloud / Rest API / WebSocket:** Thuận tiện kết nối với máy chủ Backend (Node.js, Spring Boot, Python FastAPI) qua WebSocket/MQTT để nhận dữ liệu từ thiết bị IoT thật hoặc PLC.
+Tab PLC sẽ đổi nhãn thành `LIVE — OpenPLC qua Modbus TCP`. Từ lúc đó, nút bấm
+trên web ghi thật xuống PLC và đèn tháp trên màn hình phản ánh output thật của
+runtime. Chi tiết, bản đồ địa chỉ và cách xử lý sự cố: [infra/README.md](infra/README.md).
 
 ---
 
-## 💻 Hướng Dẫn Cài Đặt & Chạy Khởi Động
+## Kiến trúc
 
-### Yêu cầu tiên quyết
-- Node.js (phiên bản v18 trở lên)
-- pnpm (hoặc npm / yarn)
+```
+  Trình duyệt ── tab PLC ──┐
+                           │ WebSocket
+  ┌────────────────────────▼─────┐      MQTT     ┌────────────┐
+  │  Edge gateway (FastAPI)      ├──────────────►│ Mosquitto  │
+  └────────────────────────▲─────┘  Unified NS   └────────────┘
+                           │ Modbus TCP :502
+                  ┌────────┴─────────┐
+                  │ OpenPLC Runtime  │ ◄── infra/plc/conveyor.st
+                  └──────────────────┘
+```
 
-### Các bước chạy dự án:
+Ánh xạ sang mô hình **ISA-95**: OpenPLC là tầng L1 (điều khiển), gateway là
+tầng edge, dashboard phủ L2 (SCADA) và L3 (MES). Topic MQTT tổ chức theo
+**Unified Namespace** — `foxconn/hanoi/smt/line-1/plc/...` — phản ánh cấu trúc
+nhà máy chứ không phản ánh sơ đồ phần mềm, có birth/death certificate qua LWT
+theo tinh thần Sparkplug B.
 
-1. **Di chuyển vào thư mục dự án:**
-   ```powershell
-   cd "d:\clone repo\smart-factory-dashboard"
-   ```
+### Cấu trúc mã nguồn
 
-2. **Cài đặt các gói phụ thuộc (Dependencies):**
-   ```powershell
-   pnpm install
-   ```
+```
+src/features/factory/
+├── components/       MachineCard, TelemetryChart, OeeGauge, DigitalTwinLine,
+│                     VisionInspector, PlcDiagnostics, MesTraceability, ScadaPanel
+├── hooks/            use-factory-store (simulator), use-plc-link (PLC thật)
+├── services/         sensorSimulator (external store), plcGateway (WebSocket)
+├── lib/              format (thời gian, thời lượng)
+└── types/            Machine, OeeMetrics, AlarmEvent, PcbInspectionRecord, PlcIoState
 
-3. **Khởi chạy môi trường phát triển (Dev Server):**
-   ```powershell
-   pnpm dev
-   ```
-
-4. **Mở trình duyệt:**
-   Truy cập địa chỉ `http://localhost:3000` để trải nghiệm giao diện!
-
----
-
-## 📜 Cấu Trúc Thư Mục Dự Án
-
-```text
-smart-factory-dashboard/
-├── src/
-│   ├── components/            # Shadcn UI components + Layout (Sidebar, Header)
-│   ├── features/
-│   │   ├── dashboard/         # Màn hình chính lắp ráp 5 Tabs Module
-│   │   └── factory/           # Module lõi Smart Factory
-│   │       ├── components/    # MachineCard, TelemetryChart, OeeGauge, DigitalTwinLine,
-│   │       │                  # VisionInspector, PlcDiagnostics, MesTraceability
-│   │       ├── services/      # sensorSimulator.ts (Data Engine real-time)
-│   │       └── types/         # TypeScript Interfaces (Machine, Alarm, Vision, PLC IO)
-│   └── routes/                # TanStack Router configuration
-├── package.json
-└── vite.config.ts
+infra/
+├── docker-compose.yml
+├── openplc/          Dockerfile build OpenPLC từ mã nguồn
+├── plc/conveyor.st   chương trình ladder (Structured Text)
+├── gateway/          Modbus → MQTT + WebSocket + REST
+├── mosquitto/        cấu hình broker
+└── load-program.sh   nạp + biên dịch + khởi động PLC
 ```
 
 ---
 
-*Dự án được xây dựng với tinh thần học hỏi, thử thách tư duy thiết kế phần mềm công nghiệp và ứng dụng thực tế kiến thức tự động hóa sản xuất.*
+## Vài chi tiết kỹ thuật đáng nói
+
+**OEE tính đúng định nghĩa.** `Availability = Run Time / Planned Production Time`,
+`Performance = (Ideal Cycle Time × Total Count) / Run Time`,
+`Quality = Good Count / Total Count`. Mỗi máy có `idealCycleSec` riêng và sản
+lượng sinh ra *từ* con số đó, nên Performance đo một thứ có thật. Performance
+chặn trần 100%: vượt ngưỡng nghĩa là ideal cycle time ghi sai chứ không phải
+máy chạy nhanh hơn vật lý.
+
+**Ladder theo đúng thực hành công nghiệp.** Nút Start/Stop là nút nhấn nhả, có
+mạch tự giữ (seal-in). Nút Stop và E-Stop đấu thường đóng (NC) nên tín hiệu
+TRUE khi *không* bị bấm — đứt dây là máy dừng, đó là nguyên tắc fail-safe; vì
+vậy mọi tiếp điểm trong chương trình đều là thường mở. Nhả E-Stop không tự khởi
+động lại máy (restart interlock, ISO 13849-1). Màn hình cũng ghi rõ: E-Stop
+thật phải cắt nguồn động lực qua rơ-le an toàn cứng đạt tối thiểu Cat.3 / PL d,
+PLC tiêu chuẩn chỉ được dùng để báo trạng thái.
+
+**Hiệu năng.** Simulator là một external store; mỗi component đăng ký đúng lát
+dữ liệu nó vẽ qua `useSyncExternalStore`, nên một tick telemetry không re-render
+các tab khác. Băng tải trong Digital Twin chạy bằng `requestAnimationFrame` ghi
+thẳng `transform` vào DOM — React chỉ render lại khi bo mạch qua mốc 5%.
+
+**Xuống thang mềm mại.** Không cấu hình `VITE_PLC_GATEWAY_URL` thì không có
+socket nào được mở; tab PLC chạy đúng logic đó ngay trong trình duyệt.
+
+---
+
+## Công nghệ
+
+| Lớp | Công nghệ |
+|---|---|
+| UI | React 19, TypeScript, Vite 8, TailwindCSS 4, shadcn/ui |
+| Dữ liệu | TanStack Router / Query / Table, Zustand, Recharts |
+| Edge | Python 3.12, FastAPI, pymodbus, paho-mqtt |
+| Công nghiệp | OpenPLC (IEC 61131-3), Modbus TCP, MQTT / Mosquitto |
+| Kiểm thử | Vitest + Playwright (browser mode) |
+
+---
+
+## Lệnh hay dùng
+
+```bash
+pnpm dev            # dev server, cổng 3000
+pnpm build          # tsc -b && vite build
+pnpm lint           # eslint
+pnpm format         # prettier --write
+pnpm knip           # tìm code và dependency không dùng
+pnpm test           # vitest (cần: npx playwright install chromium)
+```
+
+---
+
+## Giấy phép
+
+MIT. Giao diện nền dựa trên [shadcn-admin](https://github.com/satnaing/shadcn-admin).
+Tên sản phẩm và nhà máy trong dữ liệu mẫu là hư cấu, chỉ dùng cho mục đích mô phỏng.

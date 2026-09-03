@@ -1,0 +1,107 @@
+# Smart Factory — hạ tầng IIoT giai đoạn 1
+#
+#   OpenPLC (PLC mềm, chạy ladder thật)
+#        │  Modbus TCP :502
+#   Gateway (Python)  ──MQTT──►  Mosquitto  ──►  Node-RED / Grafana / …
+#        │  WebSocket :8000/ws
+#   Dashboard React
+#
+# Chạy:   docker compose -f infra/docker-compose.yml up -d --build
+# Dừng:   docker compose -f infra/docker-compose.yml down
+#
+# Lần đầu sẽ lâu (~5-10 phút) vì OpenPLC được build từ mã nguồn — dự án này
+# chưa phát hành image dựng sẵn trên Docker Hub.
+
+name: smart-factory
+
+services:
+  # --------------------------------------------------------------------
+  # PLC mềm: chạy chương trình IEC 61131-3 thật, mở Modbus TCP slave
+  # Web UI: http://127.0.0.1:8081  (đăng nhập mặc định openplc / openplc)
+  # --------------------------------------------------------------------
+  openplc:
+    build:
+      context: ./openplc
+    container_name: smart-factory-openplc
+    ports:
+      # 8080 là cổng bị tranh chấp nhất trên máy dev (Jenkins, Tomcat, các
+      # dev server khác), nên phía host dùng 8081.
+      - '8081:8080' # giao diện quản trị
+      - '502:502' # Modbus TCP slave
+    volumes:
+      - openplc-data:/docker_persistent
+      # Binary do OpenPLC biên dịch ra nằm ở webserver/core, KHÔNG nằm trong
+      # /docker_persistent. Không gắn volume ở đây thì mỗi lần container được
+      # tạo lại, runtime âm thầm quay về chương trình rỗng: Modbus vẫn lên,
+      # đọc ghi vẫn được, nhưng logic không chạy — rất khó đoán ra.
+      - openplc-core:/workdir/webserver/core
+      # Chương trình ladder của dự án, để nạp vào runtime.
+      - ./plc:/plc:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'timeout 2 bash -c "</dev/tcp/127.0.0.1/8080" || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------
+  # MQTT broker — xương sống của Unified Namespace
+  #   1883: MQTT thường (gateway, Node-RED, Python)
+  #   9001: MQTT over WebSocket (trình duyệt subscribe trực tiếp)
+  # --------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: smart-factory-mosquitto
+    ports:
+      - '1883:1883'
+      - '9001:9001'
+    volumes:
+      - ./mosquitto/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+    healthcheck:
+      # Dùng pub chứ không dùng sub: sub sẽ nằm chờ một tin nhắn không bao giờ
+      # tới rồi hết giờ, khiến broker khoẻ mạnh vẫn bị báo unhealthy.
+      test:
+        [
+          'CMD-SHELL',
+          'mosquitto_pub -h 127.0.0.1 -p 1883 -t healthcheck -m ok || exit 1',
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------
+  # Edge gateway: Modbus  ->  MQTT + WebSocket + REST
+  # --------------------------------------------------------------------
+  gateway:
+    build:
+      context: ./gateway
+    container_name: smart-factory-gateway
+    ports:
+      - '8000:8000'
+    environment:
+      PLC_HOST: openplc
+      PLC_PORT: '502'
+      PLC_UNIT_ID: '1'
+      POLL_INTERVAL_MS: '200'
+      MQTT_HOST: mosquitto
+      MQTT_PORT: '1883'
+      # Unified Namespace: enterprise/site/area/line
+      UNS_BASE: foxconn/hanoi/smt/line-1
+      LOG_LEVEL: INFO
+    depends_on:
+      mosquitto:
+        condition: service_started
+      openplc:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  openplc-data:
+  openplc-core:
+  mosquitto-data:
+  mosquitto-log:
