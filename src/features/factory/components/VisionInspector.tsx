@@ -665,7 +665,12 @@ export function VisionInspector() {
                   )}
 
                   <div className='text-[11px] text-muted-foreground'>
-                    Điểm khớp mẫu (NCC):{' '}
+                    {/* Chỉ gọi là NCC khi con số đó thật sự là NCC. Ở chế độ
+                        mô phỏng nó chỉ là số bịa, gán cho nó cái tên của một
+                        đại lượng đo được là nói dối trên HMI. */}
+                    {engineOnline
+                      ? 'Điểm khớp mẫu (NCC): '
+                      : 'Độ tin cậy thuật toán Vision: '}
                     <strong>{selectedComp.confidence}%</strong>
                   </div>
 
