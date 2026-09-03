@@ -1,0 +1,58 @@
+{
+  "model_id": "mbp-m3-logic-rev-b",
+  "model_name": "MacBook M3 Logic Board Revision B",
+  "width": 760,
+  "height": 480,
+
+  "fiducials": [
+    [64, 48],
+    [696, 432]
+  ],
+  "fiducial_radius": 7,
+  "fiducial_search_radius": [5, 12],
+  "foreign_area_px": 220,
+
+  "components": [
+    {
+      "ref": "U1",
+      "name": "IC-U1 (Main Processor)",
+      "kind": "IC",
+      "roi": [228, 106, 198, 173],
+      "match_threshold": 0.8,
+      "shift_tolerance_px": 5
+    },
+    {
+      "ref": "R12",
+      "name": "Resistor R12",
+      "kind": "Resistor",
+      "roi": [486, 125, 91, 62],
+      "match_threshold": 0.7,
+      "shift_tolerance_px": 6
+    },
+    {
+      "ref": "C45",
+      "name": "Capacitor C45",
+      "kind": "Capacitor",
+      "roi": [99, 298, 76, 82],
+      "match_threshold": 0.7,
+      "shift_tolerance_px": 6
+    },
+    {
+      "ref": "J8",
+      "name": "Solder Pin 8-12",
+      "kind": "SolderJoint",
+      "roi": [243, 336, 167, 72],
+      "match_threshold": 0.6,
+      "shift_tolerance_px": 8,
+      "defect_area_ratio": 0.03
+    },
+    {
+      "ref": "P1",
+      "name": "Type-C Port Connector",
+      "kind": "Connector",
+      "roi": [502, 288, 182, 134],
+      "match_threshold": 0.8,
+      "shift_tolerance_px": 6
+    }
+  ]
+}

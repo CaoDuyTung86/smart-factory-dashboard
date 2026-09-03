@@ -4,7 +4,7 @@
 > cần thiết: dự án là gì, đã làm tới đâu, vì sao chọn cách đó, và việc tiếp theo
 > là gì. Đưa file này vào đầu chat mới là đủ để tiếp tục mà không phải kể lại.
 >
-> Cập nhật lần cuối: **2026-09-03** (đợt 4)
+> Cập nhật lần cuối: **2026-09-03** (đợt 5)
 
 ---
 
@@ -28,14 +28,14 @@ Ràng buộc: không gấp, làm vì đam mê, có một dự án khác đang ch
 | Module | Trạng thái | Ghi chú |
 |---|---|---|
 | PLC S7-1200 & Ladder | 🟢 **Thật** | Chạy trên OpenPLC qua Modbus TCP; tự xuống thang sang mô phỏng khi không có hạ tầng |
-| Hạ tầng IIoT (`infra/`) | 🟢 **Chạy được** | OpenPLC + Mosquitto + gateway Python, đã kiểm chứng end-to-end |
+| Hạ tầng IIoT (`infra/`) | 🟢 **Chạy được** | OpenPLC + Mosquitto + gateway + vision AOI, đã kiểm chứng end-to-end |
 | SCADA Command Center | 🟡 Mô phỏng | OEE đã đúng công thức, dữ liệu cảm biến vẫn sinh trong trình duyệt |
 | Digital Twin | 🟡 Mô phỏng | Đã tối ưu hiệu năng bằng rAF |
-| Vision AOI | 🟡 Mô phỏng | Toạ độ đã chuẩn hoá 0–1, sẵn sàng nhận kết quả từ OpenCV |
+| Vision AOI | 🟢 **Thật** | Service Python + OpenCV: căn ảnh theo fiducial rồi so ảnh mẫu; tự xuống thang sang mô phỏng khi không có service |
 | MES Traceability | 🟡 Mô phỏng | Xuất CSV thật, tra cứu serial có phân biệt không tìm thấy |
 | Lưu trữ dữ liệu | 🔴 Chưa có | Refresh là mất sạch |
 | Backend MES | 🔴 Chưa có | |
-| Kiểm thử module factory | 🟢 **Có** | 50 test cho OEE / ladder / simulator; toàn bộ suite 137 test đều xanh |
+| Kiểm thử module factory | 🟢 **Có** | 148 test TypeScript + 37 test Python, tất cả đều xanh |
 
 ---
 
@@ -121,6 +121,44 @@ Vấn đề ban đầu: web nặng, tốn RAM.
 
 ---
 
+### 2026-09-03 — Đợt 5: Vision AOI thật bằng OpenCV (Ưu tiên 2 xong)
+
+`infra/vision/` — service FastAPI + OpenCV, `POST /inspect` nhận ảnh trả JSON
+đúng schema `PcbInspectionRecord` mà frontend đang đọc.
+
+- **Thuật toán** (`inspector.py`), đúng trình tự máy AOI thật: `HoughCircles`
+  tìm fiducial → `atan2` + tỷ số khoảng cách suy ra góc xoay và scale →
+  `warpAffine` căn về khung ảnh mẫu → `matchTemplate` (TM_CCOEFF_NORMED) từng
+  ô → `absdiff` tại vị trí khớp tốt nhất → `threshold` → `findContours` →
+  `boundingRect` → quét phần bo mạch còn lại tìm vật lạ.
+- **Phép so chạy trên ảnh màu, không phải ảnh xám.** Phát hiện khi thử: vật lạ
+  đỏ (B30 G30 R190) trên sơn phủ xanh (B58 G92 R40) chuyển sang xám chỉ lệch 5
+  mức — thuật toán không nhìn thấy gì. Đổi sang lấy chênh lệch lớn nhất trong
+  ba kênh màu.
+- **Cửa sổ tìm phải rộng hơn dung sai lệch.** Ban đầu để 10px trong khi dung
+  sai 6px: một linh kiện lệch 14px rơi ra ngoài cửa sổ và bị báo nhầm là
+  "thiếu linh kiện". Mặc định nâng lên 20px (~3× dung sai) — phân biệt này
+  không phải chuyện chữ nghĩa: thiếu linh kiện thì đi kiểm tra băng tải cấp
+  linh kiện, lệch chân thì đi chỉnh toạ độ pick & place.
+- **Recipe** (`recipes/*.json`): mỗi model một chương trình kiểm tra với ngưỡng
+  riêng cho từng ô. Đổi model là nạp recipe khác, không sửa mã nguồn.
+- **Ảnh mẫu sinh bằng code** (`board.py`), không có ảnh nhị phân nào trong repo.
+  Hình học lấy thẳng từ recipe nên ảnh mẫu và ô kiểm tra không thể lệch nhau,
+  và test khẳng định được "phải báo lệch chân C45 offset (+14,+3)".
+- **Frontend**: `visionService.ts` + tab `/vision` chạy chế độ LIVE khi có
+  service, hiển thị đúng tấm ảnh vừa kiểm tra kèm bounding box thật, khung vật
+  lạ, góc xoay và sai số căn ảnh. Không cấu hình `VITE_VISION_API_URL` thì
+  không gửi request nào.
+- Thanh trượt ngưỡng hạ mặc định từ 85% xuống 70% — nằm dưới ngưỡng thấp nhất
+  trong recipe, để mặc định màn hình hiện đúng phán định của thuật toán; kéo
+  lên là thấy ngay over-kill.
+- **37 test Python** + 11 test TypeScript cho lớp service.
+- **Đã kiểm chứng end-to-end** trong container: bo mạch xoay 3° vẫn PASS; thiếu
+  R12, dính thiếc J8, lệch C45 14px, vật lạ — mỗi loại báo đúng ô và đúng tên
+  lỗi; chu kỳ 20–100 ms.
+
+---
+
 ## 4. Quyết định đã chốt (đừng lật lại nếu không có lý do mới)
 
 - **Lệnh HMI ghi vào `%QX1.x`, không phải `%IX`.** Modbus master chỉ được ghi
@@ -141,6 +179,16 @@ Vấn đề ban đầu: web nặng, tốn RAM.
 - **Không dùng deep learning cho AOI.** Máy AOI công nghiệp thật phần lớn chạy
   template matching + rule-based; OpenCV cổ điển vừa đúng thực tế vừa dễ giải
   thích khi phỏng vấn.
+- **Phép so ảnh AOI chạy trên ảnh màu.** Bỏ màu là tự bịt mất một nửa thông
+  tin: trên bo mạch, màu mới là thứ phân biệt thiếc / sơn phủ / đồng / vật lạ.
+- **`search_margin_px` phải lớn hơn `shift_tolerance_px` rõ rệt** (quy ước ~3
+  lần), nếu không linh kiện lệch bị báo nhầm thành thiếu linh kiện.
+- **Ảnh dùng cho AOI sinh bằng code, không đưa ảnh nhị phân vào repo.** Ảnh
+  chụp thật thì không kiểm chứng và không tái tạo được.
+- **`visionService.ts` đọc biến môi trường mỗi lần gọi, không chốt thành hằng
+  số lúc import.** Trong browser mode của Vitest, `vi.resetModules()` không làm
+  module chạy lại (registry là của trình duyệt), nên hằng số ở tầng module thì
+  không cách nào test được nhánh "chưa cấu hình".
 
 ---
 
@@ -152,13 +200,13 @@ Vấn đề ban đầu: web nặng, tốn RAM.
 - [x] Nén 2 ảnh PNG trang sign-in (891KB) sang WebP (321KB).
 - [x] Viết test cho `sensorSimulator` (OEE, tích luỹ downtime) và logic ladder.
 
-### Ưu tiên 2 — Vision AOI thật bằng OpenCV
-Service Python `POST /inspect` nhận ảnh, trả JSON đúng schema
-`VisionComponentInspection` đang dùng (toạ độ đã chuẩn hoá 0–1 nên cắm vào là
-vẽ đúng ngay). Thuật toán đầu tiên nên làm: **golden-sample diff** — canh ảnh
-theo 2 điểm mark (`HoughCircles` → `atan2` → `warpAffine`), `absdiff` với ảnh
-mẫu, `threshold`, `findContours`, `boundingRect`. Sau đó thêm `matchTemplate`
-cho điểm khớp từng linh kiện.
+### ~~Ưu tiên 2 — Vision AOI thật bằng OpenCV~~ ✅ xong 2026-09-03
+Đã có `infra/vision/`. Còn nợ nếu muốn đi sâu tiếp:
+- [ ] Nhiều recipe hơn, và giao diện tự tạo recipe từ một ảnh mẫu (dùng chuột
+      khoanh ROI) thay vì sửa JSON tay.
+- [ ] Đo lặp lại (gauge R&R) cho thuật toán: chụp cùng một bo mạch nhiều lần,
+      xem điểm khớp dao động bao nhiêu — cơ sở thật để đặt ngưỡng.
+- [ ] Gửi kết quả AOI lên MQTT để MES nhận, thay vì chỉ trả về cho trình duyệt.
 
 ### Ưu tiên 3 — Lưu trữ & backend MES
 - [ ] TimescaleDB (extension của Postgres) lưu telemetry; dùng *continuous
@@ -217,5 +265,9 @@ curl http://127.0.0.1:8000/state
 - Các component data-table của template gốc vẫn nằm trong repo và `knip` liệt
   kê là không dùng — giữ lại vì backend MES ở Ưu tiên 3 sẽ cần bảng dữ liệu.
 - Toàn bộ stack `infra/` đang mở (MQTT ẩn danh, CORS `*`, mật khẩu OpenPLC mặc
-  định) — chỉ dùng cho máy local / mạng lab.
+  định, service vision nhận file tải lên không xác thực) — chỉ dùng cho máy
+  local / mạng lab.
+- Service AOI mới có đúng một recipe, và ảnh mẫu là ảnh tổng hợp. Cắm ảnh chụp
+  thật vào thì phải đo lại toàn bộ ngưỡng — con số hiện tại đúng cho ảnh sinh
+  bằng code, không phải cho dây chuyền thật.
 - Dữ liệu SCADA vẫn mất khi refresh trang.

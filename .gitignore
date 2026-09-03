@@ -38,3 +38,8 @@ dist-ssr
 
 # SpecStory
 .specstory/
+
+# Python (infra/vision, infra/gateway)
+__pycache__/
+*.py[cod]
+.pytest_cache/

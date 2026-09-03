@@ -41,33 +41,52 @@ pnpm dev
 Mở `http://localhost:3000`. Không cần backend, không cần Docker — dashboard tự
 sinh dữ liệu mô phỏng.
 
-## Chạy kèm PLC thật
+## Chạy kèm hạ tầng thật
 
 ```bash
 docker compose -f infra/docker-compose.yml up -d --build
 bash infra/load-program.sh
-echo "VITE_PLC_GATEWAY_URL=http://localhost:8000" > .env.local
+cat > .env.local <<'EOF'
+VITE_PLC_GATEWAY_URL=http://localhost:8000
+VITE_VISION_API_URL=http://localhost:8001
+EOF
 pnpm dev
 ```
 
-Tab PLC sẽ đổi nhãn thành `LIVE — OpenPLC qua Modbus TCP`. Từ lúc đó, nút bấm
-trên web ghi thật xuống PLC và đèn tháp trên màn hình phản ánh output thật của
-runtime. Chi tiết, bản đồ địa chỉ và cách xử lý sự cố: [infra/README.md](infra/README.md).
+`/plc` đổi nhãn thành `LIVE — OpenPLC qua Modbus TCP`: nút bấm trên web ghi
+thật xuống PLC, đèn tháp phản ánh output thật của runtime.
+
+`/vision` đổi nhãn thành `LIVE — OpenCV golden-sample`: ảnh tải lên được gửi
+sang service Python, căn theo điểm Mark rồi so với ảnh mẫu.
+
+Hai nhánh độc lập — chạy riêng từng cái cũng được:
+
+```bash
+docker compose -f infra/docker-compose.yml up -d --build vision   # chỉ AOI
+```
+
+Chi tiết, bản đồ địa chỉ, thuật toán AOI và cách xử lý sự cố:
+[infra/README.md](infra/README.md).
 
 ---
 
 ## Kiến trúc
 
 ```
-  Trình duyệt ── tab PLC ──┐
-                           │ WebSocket
-  ┌────────────────────────▼─────┐      MQTT     ┌────────────┐
-  │  Edge gateway (FastAPI)      ├──────────────►│ Mosquitto  │
-  └────────────────────────▲─────┘  Unified NS   └────────────┘
-                           │ Modbus TCP :502
-                  ┌────────┴─────────┐
-                  │ OpenPLC Runtime  │ ◄── infra/plc/conveyor.st
-                  └──────────────────┘
+              Trình duyệt
+         ┌─────────┴──────────┐
+   /plc  │ WebSocket          │ HTTP POST /inspect  /vision
+  ┌──────▼───────────────┐    │   ┌──────────────────────┐
+  │ Edge gateway         │    └──►│ Vision AOI (OpenCV)  │
+  │ FastAPI :8000        │        │ FastAPI :8001        │
+  └──┬────────────────┬──┘        └──────────────────────┘
+     │ Modbus TCP     │ MQTT (Unified Namespace)
+     │ :502           ▼
+  ┌──▼───────────┐  ┌────────────┐
+  │ OpenPLC      │  │ Mosquitto  │──► Node-RED / Grafana / …
+  │ Runtime      │  └────────────┘
+  └──────────────┘
+   infra/plc/conveyor.st
 ```
 
 Ánh xạ sang mô hình **ISA-95**: OpenPLC là tầng L1 (điều khiển), gateway là
@@ -121,6 +140,13 @@ các module khác. Băng tải trong Digital Twin chạy bằng `requestAnimatio
 ghi thẳng `transform` vào DOM — React chỉ render lại khi bo mạch qua mốc 5%.
 Năm module là năm route riêng, nên mỗi module là một chunk riêng: mở `/mes` tải
 7 KB thay vì kéo theo cả Recharts của `/scada` (377 KB).
+
+**AOI đúng cách máy thật làm.** Ảnh được căn theo 2 điểm Mark
+(`HoughCircles` → `atan2` → `warpAffine`) rồi mới so với ảnh mẫu — bỏ bước này
+thì một bo mạch tốt nhưng đặt xoay 3° sẽ báo lỗi ở toàn bộ linh kiện. Phép so
+chạy trên **ảnh màu**: một sợi dây đỏ trên sơn phủ xanh chuyển sang ảnh xám chỉ
+lệch 5 mức, gần như tàng hình. Không dùng deep learning, vì máy AOI công nghiệp
+thật phần lớn cũng không — chi tiết và lý do ở [infra/README.md](infra/README.md).
 
 **Logic nghiệp vụ tách khỏi giao diện.** Công thức OEE
 (`src/features/factory/lib/oee.ts`) và các nấc thang ladder

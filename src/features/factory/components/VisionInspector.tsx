@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   Camera,
   CheckCircle2,
   RefreshCw,
+  Radio,
   Sliders,
   Upload,
 } from 'lucide-react'
@@ -17,6 +18,15 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { formatClock } from '../lib/format'
+import {
+  fetchHealth,
+  fetchSamples,
+  inspectFile,
+  inspectSample,
+  isVisionEnabled,
+  sampleImageUrl,
+  type VisionSample,
+} from '../services/visionService'
 import type { PcbInspectionRecord } from '../types'
 
 /**
@@ -93,8 +103,18 @@ export function VisionInspector() {
   const [selectedComponentId, setSelectedComponentId] = useState<string | null>(
     'c2'
   )
-  const [sensitivity, setSensitivity] = useState(85) // % confidence threshold
-  const [customImage, setCustomImage] = useState<string | null>(null)
+  /**
+   * Ngưỡng của người vận hành, nằm dưới ngưỡng thấp nhất trong recipe (60–80%)
+   * để mặc định màn hình hiển thị đúng phán định của thuật toán. Kéo lên là
+   * thấy ngay over-kill — đó mới là mục đích của thanh trượt này.
+   */
+  const [sensitivity, setSensitivity] = useState(70)
+  const [boardImage, setBoardImage] = useState<string | null>(null)
+
+  /** Chỉ bật khi service AOI thật trả lời — cấu hình URL thôi là chưa đủ. */
+  const [engineOnline, setEngineOnline] = useState(false)
+  const [samples, setSamples] = useState<VisionSample[]>([])
+  const [error, setError] = useState<string | null>(null)
 
   const scanTimer = useRef<number | null>(null)
   const objectUrlRef = useRef<string | null>(null)
@@ -115,7 +135,72 @@ export function VisionInspector() {
     }
   }, [])
 
-  const handleRescan = (forcePass = false) => {
+  /** Nhận kết quả thật, đồng thời hiện đúng tấm ảnh vừa được kiểm tra. */
+  const applyRecord = useCallback(
+    (record: PcbInspectionRecord, imageUrl: string | null) => {
+      setInspection(record)
+      setBoardImage(imageUrl)
+      setSelectedComponentId(
+        record.components.find((c) => c.status === 'NG')?.id ??
+          record.components[0]?.id ??
+          null
+      )
+    },
+    []
+  )
+
+  // Bắt tay với service một lần khi mở tab. Không cấu hình URL thì không có
+  // request nào được gửi đi.
+  useEffect(() => {
+    if (!isVisionEnabled()) return
+
+    let cancelled = false
+
+    void (async () => {
+      try {
+        await fetchHealth()
+        const list = await fetchSamples()
+        if (cancelled) return
+        setEngineOnline(true)
+        setSamples(list)
+
+        // Chạy ngay một lần kiểm tra thật. Nếu không, màn hình sẽ treo nhãn
+        // LIVE lên bộ số mô phỏng — đúng kiểu HMI nói dối mà dự án này đang
+        // cố tránh: nhãn phải mô tả đúng dữ liệu đang hiển thị.
+        const first = list[0]
+        if (!first) return
+        const record = await inspectSample(first.name)
+        if (cancelled) return
+        applyRecord(record, sampleImageUrl(first.name))
+      } catch {
+        // Service chưa chạy: giữ nguyên chế độ mô phỏng, không làm hỏng tab.
+        if (!cancelled) setEngineOnline(false)
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [applyRecord])
+
+  const runSample = useCallback(
+    async (name: string) => {
+      setIsScanning(true)
+      setError(null)
+      try {
+        const record = await inspectSample(name)
+        applyRecord(record, sampleImageUrl(name))
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'không gọi được service AOI')
+      } finally {
+        setIsScanning(false)
+      }
+    },
+    [applyRecord]
+  )
+
+  /** Đường mô phỏng cũ: không có service thì tab vẫn dùng được như trước. */
+  const handleMockRescan = (forcePass = false) => {
     setIsScanning(true)
     if (scanTimer.current !== null) clearTimeout(scanTimer.current)
 
@@ -138,19 +223,36 @@ export function VisionInspector() {
     }, 800)
   }
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
+
     releaseObjectUrl()
     const url = URL.createObjectURL(file)
     objectUrlRef.current = url
-    setCustomImage(url)
-    handleRescan(false)
+
+    if (!engineOnline) {
+      setBoardImage(url)
+      handleMockRescan(false)
+      return
+    }
+
+    setIsScanning(true)
+    setError(null)
+    try {
+      const record = await inspectFile(file)
+      applyRecord(record, url)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'không gửi được ảnh')
+      setBoardImage(url)
+    } finally {
+      setIsScanning(false)
+    }
   }
 
   const handleClearImage = () => {
     releaseObjectUrl()
-    setCustomImage(null)
+    setBoardImage(null)
   }
 
   /**
@@ -158,6 +260,10 @@ export function VisionInspector() {
    * match score falls below it is rejected. Raising it catches more true
    * defects but produces over-kill (false NG); lowering it lets escapes
    * through. That trade-off is the daily argument on any AOI station.
+   *
+   * Với service thật, ngưỡng này nằm CHỒNG LÊN ngưỡng riêng của từng ô trong
+   * recipe — đúng như núm "sensitivity" toàn máy trên AOI thật: kỹ sư đặt
+   * ngưỡng từng ô khi lập trình, người vận hành chỉ được siết thêm.
    */
   const graded = useMemo(
     () =>
@@ -172,53 +278,110 @@ export function VisionInspector() {
     [inspection.components, sensitivity]
   )
 
-  const result = graded.some((c) => c.effectiveStatus === 'NG')
-    ? 'FAIL'
-    : 'PASS'
+  const foreignObjects = inspection.foreignObjects ?? []
+  const result =
+    graded.some((c) => c.effectiveStatus === 'NG') || foreignObjects.length > 0
+      ? 'FAIL'
+      : 'PASS'
   const overKillCount = graded.filter((c) => c.belowThreshold).length
   const selectedComp = graded.find((c) => c.id === selectedComponentId)
+  const marksFound =
+    inspection.markPoints.mark1.status === 'FOUND' &&
+    inspection.markPoints.mark2.status === 'FOUND'
 
   return (
     <Card className='border-primary/30 bg-card/60'>
-      <CardHeader className='flex flex-row items-center justify-between pb-3'>
+      <CardHeader className='flex flex-col gap-3 pb-3 xl:flex-row xl:items-center xl:justify-between'>
         <div>
-          <CardTitle className='flex items-center gap-2 text-lg font-bold'>
+          <CardTitle className='flex flex-wrap items-center gap-2 text-lg font-bold'>
             <Camera className='h-5 w-5 text-amber-500' />
-            Hệ Thống Camera Vision & AOI Inspection (Cognex / VisionPro
-            Simulator)
+            Hệ Thống Camera Vision & AOI Inspection
+            {engineOnline ? (
+              <Badge
+                variant='outline'
+                className='gap-1.5 border-emerald-500/40 bg-emerald-500/10 font-mono text-[10px] text-emerald-500'
+              >
+                <Radio className='h-3 w-3' /> LIVE — OpenCV golden-sample (
+                {inspection.cycleTimeMs} ms)
+              </Badge>
+            ) : (
+              <Badge
+                variant='outline'
+                className='font-mono text-[10px] text-muted-foreground'
+              >
+                MÔ PHỎNG — chưa nối service AOI
+              </Badge>
+            )}
           </CardTitle>
           <CardDescription>
-            Kiểm tra tự động bo mạch PCB 2D/3D bằng thị giác máy tính, nhận diện
-            điểm Mark và phát hiện lỗi NG/OK
+            {engineOnline
+              ? 'Ảnh được căn theo 2 điểm Mark rồi so với ảnh mẫu bằng OpenCV — điểm khớp là tương quan chuẩn hoá (NCC), không phải xác suất của mô hình học sâu.'
+              : 'Kiểm tra tự động bo mạch PCB bằng thị giác máy tính, nhận diện điểm Mark và phát hiện lỗi NG/OK'}
           </CardDescription>
         </div>
 
-        <div className='flex items-center gap-2'>
-          <Button
-            size='sm'
-            variant='outline'
-            onClick={() => handleRescan(false)}
-            disabled={isScanning}
-            className='gap-1.5 text-xs text-amber-500 hover:bg-amber-500/10'
-          >
-            <RefreshCw
-              className={'h-3.5 w-3.5 ' + (isScanning ? 'animate-spin' : '')}
-            />
-            Scan Mẫu Lỗi (NG)
-          </Button>
+        <div className='flex flex-wrap items-center gap-2'>
+          {engineOnline ? (
+            samples.map((s) => (
+              <Button
+                key={s.name}
+                size='sm'
+                variant={s.name === 'pass' ? 'default' : 'outline'}
+                disabled={isScanning}
+                title={s.description}
+                onClick={() => void runSample(s.name)}
+                className={
+                  'h-7 gap-1.5 text-[11px] ' +
+                  (s.name === 'pass'
+                    ? 'bg-emerald-600 text-white hover:bg-emerald-500'
+                    : 'text-amber-500 hover:bg-amber-500/10')
+                }
+              >
+                {s.name === 'pass' ? (
+                  <CheckCircle2 className='h-3.5 w-3.5' />
+                ) : (
+                  <AlertTriangle className='h-3.5 w-3.5' />
+                )}
+                {s.description}
+              </Button>
+            ))
+          ) : (
+            <>
+              <Button
+                size='sm'
+                variant='outline'
+                onClick={() => handleMockRescan(false)}
+                disabled={isScanning}
+                className='gap-1.5 text-xs text-amber-500 hover:bg-amber-500/10'
+              >
+                <RefreshCw
+                  className={
+                    'h-3.5 w-3.5 ' + (isScanning ? 'animate-spin' : '')
+                  }
+                />
+                Scan Mẫu Lỗi (NG)
+              </Button>
 
-          <Button
-            size='sm'
-            className='gap-1.5 bg-emerald-600 text-xs text-white hover:bg-emerald-500'
-            onClick={() => handleRescan(true)}
-            disabled={isScanning}
-          >
-            <CheckCircle2 className='h-3.5 w-3.5' /> Scan Mẫu Đạt (PASS)
-          </Button>
+              <Button
+                size='sm'
+                className='gap-1.5 bg-emerald-600 text-xs text-white hover:bg-emerald-500'
+                onClick={() => handleMockRescan(true)}
+                disabled={isScanning}
+              >
+                <CheckCircle2 className='h-3.5 w-3.5' /> Scan Mẫu Đạt (PASS)
+              </Button>
+            </>
+          )}
         </div>
       </CardHeader>
 
       <CardContent className='space-y-6 pt-2'>
+        {error && (
+          <div className='rounded-lg border border-destructive/40 bg-destructive/10 p-2.5 text-xs text-destructive'>
+            ⚠️ Service AOI báo lỗi: {error}
+          </div>
+        )}
+
         {/* Fine-Tuning Vision Threshold Bar */}
         <div className='flex flex-col items-start justify-between gap-3 rounded-lg border border-border/40 bg-muted/30 p-3 text-xs sm:flex-row sm:items-center'>
           <div className='flex w-full flex-wrap items-center gap-3 sm:w-auto'>
@@ -234,6 +397,7 @@ export function VisionInspector() {
               value={sensitivity}
               onChange={(e) => setSensitivity(parseInt(e.target.value))}
               className='w-32 cursor-pointer accent-primary'
+              aria-label='Detection threshold'
             />
             <span className='text-[11px] text-muted-foreground'>
               {overKillCount > 0
@@ -249,7 +413,7 @@ export function VisionInspector() {
                 type='file'
                 accept='image/*'
                 className='hidden'
-                onChange={handleImageUpload}
+                onChange={(e) => void handleImageUpload(e)}
               />
               <Button
                 size='sm'
@@ -262,7 +426,7 @@ export function VisionInspector() {
                 </span>
               </Button>
             </label>
-            {customImage && (
+            {boardImage && (
               <Button
                 size='sm'
                 variant='ghost'
@@ -286,13 +450,13 @@ export function VisionInspector() {
               <div className='absolute right-0 left-0 z-30 h-1 animate-[bounce_0.8s_infinite] bg-amber-400 shadow-[0_0_15px_#f59e0b]' />
             )}
 
-            {/* Custom Uploaded Image vs Synthetic PCB Board Graphic */}
+            {/* Ảnh thật vừa kiểm tra, hoặc bo mạch vẽ tay khi chưa có ảnh */}
             <div className='relative flex aspect-[19/12] w-full max-w-[380px] items-center justify-center overflow-hidden rounded-lg border-2 border-emerald-600/70 bg-emerald-950/90 p-3 shadow-inner'>
-              {customImage ? (
+              {boardImage ? (
                 <img
-                  src={customImage}
-                  alt='Custom PCB'
-                  className='h-full w-full rounded object-cover opacity-80'
+                  src={boardImage}
+                  alt='Bo mạch đang kiểm tra'
+                  className='absolute inset-0 h-full w-full object-fill'
                 />
               ) : (
                 <>
@@ -347,17 +511,43 @@ export function VisionInspector() {
                   </div>
                 )
               })}
+
+              {/* Vật lạ: nằm ngoài mọi ô linh kiện nên vẽ riêng */}
+              {foreignObjects.map((fo, i) => (
+                <div
+                  key={'fm-' + i}
+                  style={{
+                    left: fo.box.x * 100 + '%',
+                    top: fo.box.y * 100 + '%',
+                    width: fo.box.w * 100 + '%',
+                    height: fo.box.h * 100 + '%',
+                  }}
+                  className='absolute rounded border-2 border-dashed border-amber-400 bg-amber-400/20'
+                  title={'Vật lạ ' + fo.areaPx + ' px²'}
+                >
+                  <span className='absolute -top-4 left-0 rounded bg-amber-400 px-1 font-mono text-[8px] font-bold text-slate-950'>
+                    FM
+                  </span>
+                </div>
+              ))}
             </div>
 
             {/* Camera Overlay Status Bar */}
-            <div className='absolute top-3 left-3 flex items-center gap-2 rounded border border-slate-700 bg-slate-900/90 px-2.5 py-1 font-mono text-[11px] text-slate-300 backdrop-blur'>
-              <span className='h-2 w-2 rounded-full bg-emerald-500' />
-              <span>Cognex Industrial Cam #1</span>
+            <div className='absolute top-3 left-3 flex items-center gap-2 rounded border border-slate-700 bg-slate-900/90 px-2.5 py-1 font-mono text-[11px] text-slate-300'>
+              <span
+                className={
+                  'h-2 w-2 rounded-full ' +
+                  (engineOnline ? 'bg-emerald-500' : 'bg-slate-500')
+                }
+              />
+              <span>
+                {engineOnline ? 'OpenCV AOI Station' : 'Cognex Cam #1'}
+              </span>
               <span className='text-slate-500'>|</span>
               <span>Threshold: {sensitivity}%</span>
             </div>
 
-            <div className='absolute right-3 bottom-3 rounded border border-slate-700 bg-slate-900/90 px-2.5 py-1 font-mono text-[11px] text-slate-300 backdrop-blur'>
+            <div className='absolute right-3 bottom-3 rounded border border-slate-700 bg-slate-900/90 px-2.5 py-1 font-mono text-[11px] text-slate-300'>
               Cycle Time:{' '}
               <strong className='text-primary'>
                 {inspection.cycleTimeMs} ms
@@ -406,11 +596,38 @@ export function VisionInspector() {
               </div>
               <div className='flex justify-between'>
                 <span className='text-muted-foreground'>Mark Point 1 & 2:</span>
-                <span className='font-mono text-emerald-400'>
-                  FOUND (Theta: +{inspection.markPoints.thetaOffset}°)
+                <span
+                  className={
+                    'font-mono ' +
+                    (marksFound ? 'text-emerald-400' : 'text-destructive')
+                  }
+                >
+                  {marksFound ? 'FOUND' : 'MISSING'} (Theta:{' '}
+                  {inspection.markPoints.thetaOffset > 0 ? '+' : ''}
+                  {inspection.markPoints.thetaOffset}°)
                 </span>
               </div>
+
+              {inspection.alignment && (
+                <div className='flex justify-between'>
+                  <span className='text-muted-foreground'>Sai số căn ảnh:</span>
+                  <span className='font-mono'>
+                    {inspection.alignment.residualPx === null
+                      ? '—'
+                      : inspection.alignment.residualPx + ' px'}{' '}
+                    @ {inspection.alignment.scale}x
+                  </span>
+                </div>
+              )}
             </div>
+
+            {foreignObjects.length > 0 && (
+              <div className='rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-[11px] font-medium text-amber-500'>
+                ⚠️ {foreignObjects.length} vật lạ nằm ngoài mọi ô linh kiện
+                (foreign material) — kiểm tra từng ô không bắt được loại lỗi
+                này, phải quét lại phần bo mạch còn lại.
+              </div>
+            )}
 
             <div className='space-y-2 rounded-lg border border-border/40 bg-muted/30 p-3 text-xs'>
               <span className='block text-[11px] font-semibold tracking-wider text-muted-foreground uppercase'>
@@ -448,9 +665,22 @@ export function VisionInspector() {
                   )}
 
                   <div className='text-[11px] text-muted-foreground'>
-                    Độ tin cậy thuật toán Vision:{' '}
+                    Điểm khớp mẫu (NCC):{' '}
                     <strong>{selectedComp.confidence}%</strong>
                   </div>
+
+                  {selectedComp.offsetPx && (
+                    <div className='text-[11px] text-muted-foreground'>
+                      Lệch vị trí: <strong>{selectedComp.offsetPx[0]}</strong>,{' '}
+                      <strong>{selectedComp.offsetPx[1]}</strong> px
+                      {selectedComp.defectAreaPct !== undefined && (
+                        <>
+                          {' · '}sai khác so với ảnh mẫu:{' '}
+                          <strong>{selectedComp.defectAreaPct}%</strong>
+                        </>
+                      )}
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className='py-2 text-center text-muted-foreground italic'>

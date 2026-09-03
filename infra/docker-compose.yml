@@ -5,6 +5,8 @@
 #   Gateway (Python)  ──MQTT──►  Mosquitto  ──►  Node-RED / Grafana / …
 #        │  WebSocket :8000/ws
 #   Dashboard React
+#        │  HTTP :8001/inspect
+#   Vision AOI (Python + OpenCV)
 #
 # Chạy:   docker compose -f infra/docker-compose.yml up -d --build
 # Dừng:   docker compose -f infra/docker-compose.yml down
@@ -98,6 +100,24 @@ services:
         condition: service_started
       openplc:
         condition: service_started
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------
+  # Vision AOI: OpenCV kiem tra bo mach — POST /inspect
+  # Doc lap voi PLC: khong co PLC no van chay, va nguoc lai.
+  # --------------------------------------------------------------------
+  vision:
+    build:
+      context: ./vision
+    container_name: smart-factory-vision
+    ports:
+      - '8001:8001'
+    environment:
+      LOG_LEVEL: INFO
+      # Doi recipe la doi chuong trinh kiem tra, khong phai sua ma nguon.
+      RECIPE_DIR: /app/recipes
+    volumes:
+      - ./vision/recipes:/app/recipes:ro
     restart: unless-stopped
 
 volumes:

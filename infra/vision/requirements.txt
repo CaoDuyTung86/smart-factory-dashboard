@@ -1,0 +1,7 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+python-multipart==0.0.20
+# headless: khong keo theo GTK/X11 — container khong co man hinh de ve len.
+opencv-python-headless==4.10.0.84
+numpy==1.26.4

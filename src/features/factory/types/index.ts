@@ -63,15 +63,41 @@ export interface FactoryState {
   audioEnabled: boolean
 }
 
+/** Normalised to the board image (0..1) so boxes track any image size. */
+export interface NormalisedBox {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
 export interface VisionComponentInspection {
   id: string
   name: string
   type: 'IC' | 'Resistor' | 'Capacitor' | 'Connector' | 'SolderJoint'
   status: 'OK' | 'NG'
   issue?: string
+  /**
+   * Match score as a percentage. With the OpenCV service running this is the
+   * normalised cross-correlation score against the golden sample — a
+   * measurable quantity, not a model's probability.
+   */
   confidence: number // %
-  /** Normalised to the board image (0..1) so boxes track any image size. */
-  box: { x: number; y: number; w: number; h: number }
+  box: NormalisedBox
+  /** How far the component sat from its nominal position, in pixels. */
+  offsetPx?: [number, number]
+  /** Share of the inspection window that differs from the golden sample. */
+  defectAreaPct?: number
+}
+
+/**
+ * A difference large enough to matter that sits outside every component
+ * window — solder splash, a stray wire, a dropped part. Per-component checks
+ * cannot see these, which is why the board is swept a second time.
+ */
+export interface ForeignObjectDetection {
+  box: NormalisedBox
+  areaPx: number
 }
 
 export interface PcbInspectionRecord {
@@ -87,6 +113,16 @@ export interface PcbInspectionRecord {
     thetaOffset: number // degrees
   }
   components: VisionComponentInspection[]
+  foreignObjects?: ForeignObjectDetection[]
+  /** Present only when a real inspection engine produced this record. */
+  alignment?: {
+    ok: boolean
+    scale: number
+    /** How far the second fiducial missed its nominal spot after alignment. */
+    residualPx: number | null
+  }
+  /** Which engine produced the record — absent means the built-in simulation. */
+  engine?: string
 }
 
 export interface PlcIoState {
