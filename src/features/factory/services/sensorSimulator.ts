@@ -1,3 +1,4 @@
+import { computeOee, sameOee } from '../lib/oee'
 import type {
   AlarmEvent,
   FactoryState,
@@ -96,15 +97,6 @@ function densityFactor(density: FeedDensity) {
   return density === 'HIGH' ? 1.4 : density === 'LOW' ? 0.7 : 1.0
 }
 
-function sameOee(a: OeeMetrics, b: OeeMetrics) {
-  return (
-    a.availability === b.availability &&
-    a.performance === b.performance &&
-    a.quality === b.quality &&
-    a.overall === b.overall
-  )
-}
-
 class SensorSimulator {
   private machines: Machine[] = INITIAL_MACHINES.map((m) => ({ ...m }))
   private telemetryHistory: Record<string, TelemetryPoint[]> = {}
@@ -133,7 +125,7 @@ class SensorSimulator {
         vibration: m.vibration,
       }))
     })
-    this.oee = this.computeOee()
+    this.oee = computeOee(this.machines)
     this.rebuildSnapshot()
   }
 
@@ -171,7 +163,7 @@ class SensorSimulator {
   private notify() {
     // OEE keeps its object identity while the numbers are unchanged, so panels
     // that only read OEE re-render on real movement instead of every tick.
-    const next = this.computeOee()
+    const next = computeOee(this.machines)
     if (!sameOee(next, this.oee)) this.oee = next
 
     this.rebuildSnapshot()
@@ -495,47 +487,6 @@ class SensorSimulator {
     this.lineSpeed = 1.0
     this.feedDensity = 'NORMAL'
     this.notify()
-  }
-
-  // -------------------------------------------------------------------- OEE
-
-  /**
-   * OEE per the Nakajima / SEMI E10 definition, aggregated over the line:
-   *   Availability = Run Time / Planned Production Time
-   *   Performance  = (Ideal Cycle Time x Total Count) / Run Time
-   *   Quality      = Good Count / Total Count
-   * Performance is capped at 100%: a higher figure means the ideal cycle time
-   * on record is wrong, not that the line beat physics.
-   */
-  private computeOee(): OeeMetrics {
-    let runMs = 0
-    let downMs = 0
-    let totalCount = 0
-    let goodCount = 0
-    let idealRunMs = 0
-
-    for (const m of this.machines) {
-      runMs += m.runTimeMs
-      downMs += m.downTimeMs
-      totalCount += m.output
-      goodCount += m.output - m.defects
-      idealRunMs += m.output * m.idealCycleSec * 1000
-    }
-
-    const plannedMs = runMs + downMs
-    const availability = plannedMs > 0 ? (runMs / plannedMs) * 100 : 0
-    const performance =
-      runMs > 0 ? Math.min(100, (idealRunMs / runMs) * 100) : 0
-    const quality = totalCount > 0 ? (goodCount / totalCount) * 100 : 100
-
-    return {
-      availability: Number(availability.toFixed(1)),
-      performance: Number(performance.toFixed(1)),
-      quality: Number(quality.toFixed(1)),
-      overall: Number(
-        ((availability * performance * quality) / 10000).toFixed(1)
-      ),
-    }
   }
 }
 

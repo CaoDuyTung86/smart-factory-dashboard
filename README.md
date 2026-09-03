@@ -18,14 +18,14 @@
 hoá tại nhà máy sản xuất linh kiện điện tử, viết lại bằng góc nhìn kỹ thuật
 phần mềm. Nói rõ ngay để không ai kỳ vọng nhầm:
 
-| Thành phần | Trạng thái |
-|---|---|
-| Tab **PLC S7-1200 & Ladder** | **Thật** — chương trình IEC 61131-3 chạy trên OpenPLC, đọc/ghi qua Modbus TCP, khi có hạ tầng ở [`infra/`](infra/). Không có hạ tầng thì tự chuyển sang mô phỏng cùng logic. |
-| Tab **SCADA Command Center** | Mô phỏng — dữ liệu cảm biến sinh trong trình duyệt, nhưng OEE tính đúng công thức Nakajima/SEMI E10. |
-| Tab **Digital Twin** | Mô phỏng — chuyển động băng tải, hành trình servo, actuator khí nén. |
-| Tab **Vision AOI** | Mô phỏng — bounding box và điểm khớp cố định. Chưa có thuật toán thị giác thật. |
-| Tab **MES Traceability** | Mô phỏng — timeline một lô hàng mẫu, xuất được CSV. |
-| Lưu trữ dữ liệu | **Chưa có** — refresh trang là mất. Time-series DB nằm ở giai đoạn 3. |
+| Thành phần                          | Trạng thái                                                                                                                                                                   |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/plc` — **PLC S7-1200 & Ladder**   | **Thật** — chương trình IEC 61131-3 chạy trên OpenPLC, đọc/ghi qua Modbus TCP, khi có hạ tầng ở [`infra/`](infra/). Không có hạ tầng thì tự chuyển sang mô phỏng cùng logic. |
+| `/scada` — **SCADA Command Center** | Mô phỏng — dữ liệu cảm biến sinh trong trình duyệt, nhưng OEE tính đúng công thức Nakajima/SEMI E10.                                                                         |
+| `/twin` — **Digital Twin**          | Mô phỏng — chuyển động băng tải, hành trình servo, actuator khí nén.                                                                                                         |
+| `/vision` — **Vision AOI**          | Mô phỏng — bounding box và điểm khớp cố định. Chưa có thuật toán thị giác thật.                                                                                              |
+| `/mes` — **MES Traceability**       | Mô phỏng — timeline một lô hàng mẫu, xuất được CSV.                                                                                                                          |
+| Lưu trữ dữ liệu                     | **Chưa có** — refresh trang là mất. Time-series DB nằm ở giai đoạn 3.                                                                                                        |
 
 Lộ trình đưa các phần còn lại về "thật" nằm trong [PROJECT_STATUS.md](PROJECT_STATUS.md).
 
@@ -103,13 +103,13 @@ infra/
 **OEE tính đúng định nghĩa.** `Availability = Run Time / Planned Production Time`,
 `Performance = (Ideal Cycle Time × Total Count) / Run Time`,
 `Quality = Good Count / Total Count`. Mỗi máy có `idealCycleSec` riêng và sản
-lượng sinh ra *từ* con số đó, nên Performance đo một thứ có thật. Performance
+lượng sinh ra _từ_ con số đó, nên Performance đo một thứ có thật. Performance
 chặn trần 100%: vượt ngưỡng nghĩa là ideal cycle time ghi sai chứ không phải
 máy chạy nhanh hơn vật lý.
 
 **Ladder theo đúng thực hành công nghiệp.** Nút Start/Stop là nút nhấn nhả, có
 mạch tự giữ (seal-in). Nút Stop và E-Stop đấu thường đóng (NC) nên tín hiệu
-TRUE khi *không* bị bấm — đứt dây là máy dừng, đó là nguyên tắc fail-safe; vì
+TRUE khi _không_ bị bấm — đứt dây là máy dừng, đó là nguyên tắc fail-safe; vì
 vậy mọi tiếp điểm trong chương trình đều là thường mở. Nhả E-Stop không tự khởi
 động lại máy (restart interlock, ISO 13849-1). Màn hình cũng ghi rõ: E-Stop
 thật phải cắt nguồn động lực qua rơ-le an toàn cứng đạt tối thiểu Cat.3 / PL d,
@@ -117,8 +117,17 @@ PLC tiêu chuẩn chỉ được dùng để báo trạng thái.
 
 **Hiệu năng.** Simulator là một external store; mỗi component đăng ký đúng lát
 dữ liệu nó vẽ qua `useSyncExternalStore`, nên một tick telemetry không re-render
-các tab khác. Băng tải trong Digital Twin chạy bằng `requestAnimationFrame` ghi
-thẳng `transform` vào DOM — React chỉ render lại khi bo mạch qua mốc 5%.
+các module khác. Băng tải trong Digital Twin chạy bằng `requestAnimationFrame`
+ghi thẳng `transform` vào DOM — React chỉ render lại khi bo mạch qua mốc 5%.
+Năm module là năm route riêng, nên mỗi module là một chunk riêng: mở `/mes` tải
+7 KB thay vì kéo theo cả Recharts của `/scada` (377 KB).
+
+**Logic nghiệp vụ tách khỏi giao diện.** Công thức OEE
+(`src/features/factory/lib/oee.ts`) và các nấc thang ladder
+(`src/features/factory/lib/ladder.ts`) là hàm thuần, không dính React. Nhờ vậy
+chúng kiểm thử được bằng ví dụ mẫu — và `ladder.ts` giữ đúng từng dòng với
+`infra/plc/conveyor.st` đang chạy trên PLC thật, để chế độ mô phỏng và chế độ
+LIVE không thể hiểu khác nhau về cùng một mạch.
 
 **Xuống thang mềm mại.** Không cấu hình `VITE_PLC_GATEWAY_URL` thì không có
 socket nào được mở; tab PLC chạy đúng logic đó ngay trong trình duyệt.
@@ -127,13 +136,13 @@ socket nào được mở; tab PLC chạy đúng logic đó ngay trong trình du
 
 ## Công nghệ
 
-| Lớp | Công nghệ |
-|---|---|
-| UI | React 19, TypeScript, Vite 8, TailwindCSS 4, shadcn/ui |
-| Dữ liệu | TanStack Router / Query / Table, Zustand, Recharts |
-| Edge | Python 3.12, FastAPI, pymodbus, paho-mqtt |
-| Công nghiệp | OpenPLC (IEC 61131-3), Modbus TCP, MQTT / Mosquitto |
-| Kiểm thử | Vitest + Playwright (browser mode) |
+| Lớp         | Công nghệ                                              |
+| ----------- | ------------------------------------------------------ |
+| UI          | React 19, TypeScript, Vite 8, TailwindCSS 4, shadcn/ui |
+| Dữ liệu     | TanStack Router / Query / Table, Zustand, Recharts     |
+| Edge        | Python 3.12, FastAPI, pymodbus, paho-mqtt              |
+| Công nghiệp | OpenPLC (IEC 61131-3), Modbus TCP, MQTT / Mosquitto    |
+| Kiểm thử    | Vitest + Playwright (browser mode)                     |
 
 ---
 
@@ -145,8 +154,19 @@ pnpm build          # tsc -b && vite build
 pnpm lint           # eslint
 pnpm format         # prettier --write
 pnpm knip           # tìm code và dependency không dùng
-pnpm test           # vitest (cần: npx playwright install chromium)
+pnpm test           # vitest (lần đầu: npx playwright install chromium)
 ```
+
+### Kiểm thử
+
+137 test chạy trong Chromium thật (Vitest browser mode). Phần nghiệp vụ được
+phủ:
+
+| File                               | Nội dung                                                                                                                                                                                                  |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lib/oee.test.ts`                  | Đối chiếu với ví dụ mẫu đã công bố (A 88.8 / P 86.1 / Q 97.8 / OEE 74.8%); chặn lỗi kinh điển là lấy **trung bình** ba hệ số thay vì **nhân**; chặn cả việc tính giờ nghỉ ca vào planned production time. |
+| `lib/ladder.test.ts`               | Tự giữ, restart interlock khi nhả E-Stop, đứt dây NC = bấm nút, đèn tháp; Stop **không** phải sự cố an toàn nên không bật đèn đỏ.                                                                         |
+| `services/sensorSimulator.test.ts` | Máy dừng ăn vào down time chứ không vào run time; đồng hồ chỉ chạy khi có subscriber; `telemetryHistory` được thay mới thay vì mutate tại chỗ; chống alarm chattering.                                    |
 
 ---
 

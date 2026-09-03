@@ -1,6 +1,5 @@
 import {
   Construction,
-  LayoutDashboard,
   Monitor,
   Bug,
   FileX,
@@ -17,6 +16,7 @@ import {
   Command,
   GalleryVerticalEnd,
 } from 'lucide-react'
+import { factoryModules } from '@/features/factory/lib/modules'
 import { type SidebarData } from '../types'
 
 export const sidebarData: SidebarData = {
@@ -44,14 +44,13 @@ export const sidebarData: SidebarData = {
   ],
   navGroups: [
     {
-      title: 'General',
-      items: [
-        {
-          title: 'Dashboard',
-          url: '/',
-          icon: LayoutDashboard,
-        },
-      ],
+      title: 'Shop Floor',
+      // Mirrors the tab strip in the factory shell — one list, two renderings.
+      items: factoryModules.map(({ to, shortLabel, icon }) => ({
+        title: shortLabel,
+        url: to,
+        icon,
+      })),
     },
     {
       title: 'Pages',

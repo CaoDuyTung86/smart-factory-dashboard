@@ -4,7 +4,7 @@
 > cần thiết: dự án là gì, đã làm tới đâu, vì sao chọn cách đó, và việc tiếp theo
 > là gì. Đưa file này vào đầu chat mới là đủ để tiếp tục mà không phải kể lại.
 >
-> Cập nhật lần cuối: **2026-09-03**
+> Cập nhật lần cuối: **2026-09-03** (đợt 4)
 
 ---
 
@@ -35,7 +35,7 @@ Ràng buộc: không gấp, làm vì đam mê, có một dự án khác đang ch
 | MES Traceability | 🟡 Mô phỏng | Xuất CSV thật, tra cứu serial có phân biệt không tìm thấy |
 | Lưu trữ dữ liệu | 🔴 Chưa có | Refresh là mất sạch |
 | Backend MES | 🔴 Chưa có | |
-| Kiểm thử module factory | 🔴 Chưa có | Test có sẵn của template không chạy được vì thiếu Playwright chromium |
+| Kiểm thử module factory | 🟢 **Có** | 50 test cho OEE / ladder / simulator; toàn bộ suite 137 test đều xanh |
 
 ---
 
@@ -91,6 +91,36 @@ Vấn đề ban đầu: web nặng, tốn RAM.
 
 ---
 
+### 2026-09-03 — Đợt 4: Dọn nợ frontend (Ưu tiên 1 xong)
+
+- **Tách 5 tab thành 5 route** (`/scada`, `/twin`, `/vision`, `/plc`, `/mes`)
+  qua layout route không đường dẫn `_authenticated/_factory.tsx`. Deep-link
+  được, nút Back của trình duyệt hoạt động, và `autoCodeSplitting` chia chunk
+  thật: `/mes` 7 KB, `/vision` 11 KB, `/twin` 13 KB, `/plc` 17 KB, `/scada`
+  377 KB (Recharts). Trước đó vào bất kỳ tab nào cũng tải cả 403 KB.
+  `/` chuyển hướng sang `/scada`.
+- Danh sách module nằm ở `features/factory/lib/modules.ts`, cả thanh tab lẫn
+  sidebar cùng đọc từ đó — thêm module chỉ sửa một chỗ.
+- **Tách logic nghiệp vụ ra hàm thuần** để kiểm thử được:
+  - `lib/oee.ts` — `computeOee(machines)`, gỡ khỏi thân class simulator.
+  - `lib/ladder.ts` — `solveLadder(inputs, prevConveyor)`, gỡ khỏi
+    `PlcDiagnostics.tsx`. Đây là bản sao từng dòng của `infra/plc/conveyor.st`;
+    tách ra rồi thì lời khẳng định "mô phỏng chạy đúng logic PLC thật" mới
+    kiểm chứng được thay vì chỉ nói miệng.
+- **50 test mới**: OEE đối chiếu ví dụ mẫu (A 88.8 / P 86.1 / Q 97.8 /
+  OEE 74.8%) và chặn lỗi lấy trung bình ba hệ số; ladder kiểm tra tự giữ,
+  restart interlock, đứt dây NC; simulator kiểm tra down time không bị tính
+  nhầm sang run time và `telemetryHistory` không bị mutate tại chỗ.
+- Sửa 2 test `search-provider` vốn đã hỏng từ trước: chúng còn tìm mục
+  `Tasks` của template gốc — mục này đã bị gỡ khỏi sidebar từ lâu.
+- `pnpm knip` sạch phần dependency: gỡ `@clerk/react`, `@faker-js/faker` và
+  hai file logo Clerk.
+- Ảnh trang sign-in: 2 PNG 891 KB → WebP 321 KB (**-64%**), mã hoá bằng chính
+  Chromium của Playwright nên không phải thêm dependency ảnh nào.
+- `vite.config.ts`: `__dirname` → `import.meta.dirname` (Vite 8 cảnh báo).
+
+---
+
 ## 4. Quyết định đã chốt (đừng lật lại nếu không có lý do mới)
 
 - **Lệnh HMI ghi vào `%QX1.x`, không phải `%IX`.** Modbus master chỉ được ghi
@@ -116,13 +146,11 @@ Vấn đề ban đầu: web nặng, tốn RAM.
 
 ## 5. Việc tiếp theo (theo thứ tự ưu tiên)
 
-### Ưu tiên 1 — Dọn nốt phần frontend còn nợ
-- [ ] Tách 5 tab thành 5 route (`/scada`, `/twin`, `/vision`, `/plc`, `/mes`)
-      để deep-link được và `autoCodeSplitting` tự chia chunk.
-- [ ] `pnpm knip` rồi gỡ `@clerk/react` và `@faker-js/faker` (0 file dùng).
-- [ ] Nén 2 ảnh PNG trang sign-in (891KB) sang WebP.
-- [ ] `npx playwright install chromium` rồi viết test cho `sensorSimulator`
-      (OEE, tích luỹ downtime) và cho logic ladder.
+### ~~Ưu tiên 1 — Dọn nốt phần frontend còn nợ~~ ✅ xong 2026-09-03
+- [x] Tách 5 tab thành 5 route (`/scada`, `/twin`, `/vision`, `/plc`, `/mes`).
+- [x] `pnpm knip` rồi gỡ `@clerk/react` và `@faker-js/faker`.
+- [x] Nén 2 ảnh PNG trang sign-in (891KB) sang WebP (321KB).
+- [x] Viết test cho `sensorSimulator` (OEE, tích luỹ downtime) và logic ladder.
 
 ### Ưu tiên 2 — Vision AOI thật bằng OpenCV
 Service Python `POST /inspect` nhận ảnh, trả JSON đúng schema
@@ -182,10 +210,12 @@ curl http://127.0.0.1:8000/state
 
 ## 7. Vấn đề đã biết
 
-- Test suite của template không chạy được: thiếu Playwright chromium
-  (`npx playwright install chromium`). Chưa có test nào cho module factory.
-- Bundle `_authenticated` khoảng 403KB, chủ yếu do Recharts kéo theo d3. Nếu
-  telemetry là trọng tâm, cân nhắc `uPlot` (~40KB).
+- Chunk `/scada` vẫn 377KB, gần như toàn bộ là Recharts kéo theo d3. Nếu
+  telemetry là trọng tâm, cân nhắc `uPlot` (~40KB). Bốn module còn lại đã
+  xuống dưới 20KB mỗi cái sau khi tách route.
+- `npm audit` báo 1 lỗ hổng high ở `nanoid` (dependency gián tiếp).
+- Các component data-table của template gốc vẫn nằm trong repo và `knip` liệt
+  kê là không dùng — giữ lại vì backend MES ở Ưu tiên 3 sẽ cần bảng dữ liệu.
 - Toàn bộ stack `infra/` đang mở (MQTT ẩn danh, CORS `*`, mật khẩu OpenPLC mặc
   định) — chỉ dùng cho máy local / mạng lab.
 - Dữ liệu SCADA vẫn mất khi refresh trang.

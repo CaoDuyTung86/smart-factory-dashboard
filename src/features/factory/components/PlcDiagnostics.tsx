@@ -11,32 +11,23 @@ import {
 } from '@/components/ui/card'
 import { useFactoryStore } from '../hooks/use-factory-store'
 import { usePlcLink } from '../hooks/use-plc-link'
+import {
+  INITIAL_LADDER_INPUTS,
+  safetyFaultOf,
+  solveLadder,
+  type LadderInputs,
+} from '../lib/ladder'
 import { plcGateway } from '../services/plcGateway'
 
 /**
- * Field signals as the CPU sees them at the input terminals.
- *
- * Stop buttons and E-Stops are wired normally-closed, so a healthy, un-pressed
- * button puts 24V on the input and the signal reads TRUE. A broken wire then
- * reads FALSE and stops the machine — fail-safe. That is why every contact in
- * the ladder below is examined as normally-open (`[ ]`): the NC is in the
- * wiring, not in the program. Drawing an NC contact `[/]` for an E-Stop, as an
- * earlier version of this screen did, inverts the logic and would keep the
- * conveyor running with the button pressed.
+ * Field signals as the CPU sees them at the input terminals — the rungs
+ * themselves live in `../lib/ladder`, which mirrors `infra/plc/conveyor.st`.
+ * This screen only wires the buttons to that solver, so the simulated mode and
+ * the live PLC cannot disagree about what the ladder means.
  */
-interface PlcInputs {
-  i00_startPb: boolean // momentary NO push button
-  i01_stopPb: boolean // NC wiring: TRUE = not pressed
-  i02_eStop: boolean // NC safety chain: TRUE = not pressed
-  i03_doorClosed: boolean // TRUE = guard door closed
-}
+type PlcInputs = LadderInputs
 
-const INITIAL_INPUTS: PlcInputs = {
-  i00_startPb: false,
-  i01_stopPb: true,
-  i02_eStop: true,
-  i03_doorClosed: true,
-}
+const INITIAL_INPUTS = INITIAL_LADDER_INPUTS
 
 /** Siemens analog modules map 0–10 V onto 0…27648 counts (nominal range). */
 const SIEMENS_FULL_SCALE = 27648
@@ -107,13 +98,7 @@ export function PlcDiagnostics() {
   // One scan cycle: read inputs -> solve the rungs -> write outputs.
   const scan = (next: PlcInputs) => {
     setLocalInputs(next)
-    setLocalConveyor(
-      (prev) =>
-        (next.i00_startPb || prev) &&
-        next.i01_stopPb &&
-        next.i02_eStop &&
-        next.i03_doorClosed
-    )
+    setLocalConveyor((prev) => solveLadder(next, prev).q00_conveyor)
   }
 
   const setInput = <K extends keyof PlcInputs>(key: K, value: boolean) => {
@@ -141,7 +126,10 @@ export function PlcDiagnostics() {
     }
   }
 
-  const safetyFault = !inputs.i02_eStop || !inputs.i03_doorClosed
+  // In live mode the PLC is the authority for the coils. In simulated mode the
+  // towers are derived from the coil the last scan actually latched, not from a
+  // fresh solve, so what the lamps show is what Q0.0 really is.
+  const safetyFault = safetyFaultOf(inputs)
   const q02_redTower = live ? link.outputs.red_tower : safetyFault
   const q03_greenTower = live
     ? link.outputs.green_tower

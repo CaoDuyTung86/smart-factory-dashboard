@@ -1,8 +1,8 @@
 import { Link } from '@tanstack/react-router'
 import { Logo } from '@/assets/logo'
 import { cn } from '@/lib/utils'
-import dashboardDark from './assets/dashboard-dark.png'
-import dashboardLight from './assets/dashboard-light.png'
+import dashboardDark from './assets/dashboard-dark.webp'
+import dashboardLight from './assets/dashboard-light.webp'
 import { UserAuthForm } from './components/user-auth-form'
 
 export function SignIn2() {
