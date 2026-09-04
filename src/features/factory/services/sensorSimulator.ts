@@ -7,6 +7,23 @@ import type {
   OeeMetrics,
   TelemetryPoint,
 } from '../types'
+import { alarmChime } from './alarmChime'
+
+/**
+ * Ngưỡng cảnh báo nhiệt độ theo từng máy, chép từ bảng `asset` của backend
+ * (`infra/db/init/04-assets.sql`). Lò reflow chạy 245°C là bình thường, máy gắn
+ * linh kiện 245°C là cháy — một ngưỡng dùng chung cho cả dây chuyền thì hoặc
+ * báo động giả suốt ngày, hoặc không bao giờ báo.
+ *
+ * Khi chạy với backend MES thì ngưỡng lấy thẳng từ DB; bản trong trình duyệt
+ * này chỉ dùng cho chế độ mô phỏng ngoại tuyến.
+ */
+const WARN_TEMP_C: Record<string, number> = {
+  'SMT-LINE-01': 75,
+  'REFLOW-OVEN-02': 262,
+  'CNC-MILL-03': 85,
+  'AOI-INSPECT-04': 55,
+}
 
 const TICK_MS = 1500
 /** Points kept per machine — 40 x 1.5s = a 60 second rolling window. */
@@ -32,7 +49,7 @@ function seedMachine(
 
 const INITIAL_MACHINES: Machine[] = [
   seedMachine({
-    id: 'm1',
+    id: 'SMT-LINE-01',
     name: 'SMT Pick & Place',
     code: 'SMT-LINE-01',
     category: 'Assembly',
@@ -48,7 +65,7 @@ const INITIAL_MACHINES: Machine[] = [
   seedMachine({
     // SMT line -> reflow oven. Wave soldering is a through-hole process and
     // does not belong on a surface-mount line.
-    id: 'm2',
+    id: 'REFLOW-OVEN-02',
     name: 'Reflow Soldering Oven',
     code: 'REFLOW-OVEN-02',
     category: 'Soldering',
@@ -62,7 +79,7 @@ const INITIAL_MACHINES: Machine[] = [
     idealCycleSec: 0.45,
   }),
   seedMachine({
-    id: 'm3',
+    id: 'CNC-MILL-03',
     name: 'CNC Enclosure Milling',
     code: 'CNC-MILL-03',
     category: 'Machining',
@@ -76,7 +93,7 @@ const INITIAL_MACHINES: Machine[] = [
     idealCycleSec: 1.2,
   }),
   seedMachine({
-    id: 'm4',
+    id: 'AOI-INSPECT-04',
     name: 'AOI Optical Inspection',
     code: 'AOI-INSPECT-04',
     category: 'Quality Control',
@@ -109,11 +126,8 @@ class SensorSimulator {
   }
   private lineSpeed = 1.0
   private feedDensity: FeedDensity = 'NORMAL'
-  private audioEnabled = false
-
   private readonly listeners = new Set<Listener>()
   private intervalId: number | null = null
-  private audioCtx: AudioContext | null = null
   private snapshot!: FactoryState
 
   constructor() {
@@ -156,7 +170,6 @@ class SensorSimulator {
       oee: this.oee,
       lineSpeed: this.lineSpeed,
       feedDensity: this.feedDensity,
-      audioEnabled: this.audioEnabled,
     }
   }
 
@@ -180,70 +193,7 @@ class SensorSimulator {
       clearInterval(this.intervalId)
       this.intervalId = null
     }
-    this.closeAudio()
-  }
-
-  // ------------------------------------------------------------------- audio
-
-  private ensureAudioContext(): AudioContext | null {
-    if (this.audioCtx) return this.audioCtx
-    const AudioCtxClass =
-      window.AudioContext ||
-      (window as unknown as { webkitAudioContext?: typeof AudioContext })
-        .webkitAudioContext
-    if (!AudioCtxClass) return null
-    this.audioCtx = new AudioCtxClass()
-    return this.audioCtx
-  }
-
-  private closeAudio() {
-    if (!this.audioCtx) return
-    void this.audioCtx.close().catch(() => undefined)
-    this.audioCtx = null
-  }
-
-  public toggleAudioAlarm(enable: boolean) {
-    this.audioEnabled = enable
-
-    if (enable) {
-      const ctx = this.ensureAudioContext()
-      if (ctx?.state === 'suspended') void ctx.resume()
-      this.playChime(660, 0.15)
-    } else if (this.audioCtx) {
-      // Suspended, not closed: re-enabling must not need a whole new context.
-      void this.audioCtx.suspend().catch(() => undefined)
-    }
-
-    this.notify()
-  }
-
-  private playChime(freq: number, duration: number) {
-    const ctx = this.audioCtx
-    if (!ctx || ctx.state === 'closed') return
-    try {
-      const osc = ctx.createOscillator()
-      const gain = ctx.createGain()
-      osc.type = 'sine'
-      osc.frequency.setValueAtTime(freq, ctx.currentTime)
-      gain.gain.setValueAtTime(0.1, ctx.currentTime)
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration)
-      osc.connect(gain)
-      gain.connect(ctx.destination)
-      osc.start()
-      osc.stop(ctx.currentTime + duration)
-      // Oscillators are one-shot: release the graph once it has finished.
-      osc.onended = () => {
-        osc.disconnect()
-        gain.disconnect()
-      }
-    } catch {
-      // Autoplay policy or a closed context — alarms stay visual only.
-    }
-  }
-
-  private playAlarmBeep() {
-    if (!this.audioEnabled) return
-    this.playChime(880, 0.3)
+    alarmChime.close()
   }
 
   // -------------------------------------------------------------- simulation
@@ -330,18 +280,20 @@ class SensorSimulator {
           newTemp,
           '°C'
         )
-      } else if (m.id === 'm1' && newTemp > 75) {
+      } else if (newTemp > (WARN_TEMP_C[m.id] ?? Infinity)) {
         status = 'warning'
         this.addAlarm(
           m,
-          'Warning: SMT Head Temperature Elevated',
+          'Warning: ' + m.name + ' temperature elevated',
           'warning',
           newTemp,
           '°C'
         )
       } else if (
         status === 'warning' &&
-        newTemp < 72 &&
+        // Trả về bình thường có độ trễ 3°C: trả về ngay tại ngưỡng thì một dao
+        // động nhỏ làm cảnh báo bật/tắt liên tục.
+        newTemp < (WARN_TEMP_C[m.id] ?? Infinity) - 3 &&
         newVib < 4.0 &&
         this.lineSpeed <= 2.0
       ) {
@@ -388,7 +340,7 @@ class SensorSimulator {
     )
     if (alreadyActive) return
 
-    this.playAlarmBeep()
+    alarmChime.beep()
 
     const newAlarm: AlarmEvent = {
       id: 'alarm-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
@@ -413,7 +365,7 @@ class SensorSimulator {
       if (m.id !== machineId) return m
 
       if (faultType === 'overheat') {
-        const val = m.id === 'm2' ? 295.0 : 88.5
+        const val = m.id === 'REFLOW-OVEN-02' ? 295.0 : 88.5
         this.addAlarm(
           m,
           'CRITICAL: Thermal Overheat Detected! (' + val + '°C)',

@@ -8,6 +8,11 @@
 #        │  HTTP :8001/inspect
 #   Vision AOI (Python + OpenCV)
 #
+#   Gateway ──asyncpg──►  TimescaleDB  ◄──asyncpg──  MES backend (FastAPI)
+#                         :5432                      :8002  REST + WS
+#                                                       ▲
+#                                              Dashboard React (tab SCADA/MES)
+#
 # Chạy:   docker compose -f infra/docker-compose.yml up -d --build
 # Dừng:   docker compose -f infra/docker-compose.yml down
 #
@@ -95,11 +100,17 @@ services:
       # Unified Namespace: enterprise/site/area/line
       UNS_BASE: foxconn/hanoi/smt/line-1
       LOG_LEVEL: INFO
+      # Historian. Bo bien nay di thi gateway van chay y het nhu truoc, chi la
+      # khong ghi gi xuong DB — cung mot kieu xuong thang nhu PLC va vision.
+      DATABASE_URL: postgresql://factory:factory@timescaledb:5432/factory
+      HISTORIAN_ASSET_CODE: CONVEYOR-01
     depends_on:
       mosquitto:
         condition: service_started
       openplc:
         condition: service_started
+      timescaledb:
+        condition: service_healthy
     restart: unless-stopped
 
   # --------------------------------------------------------------------
@@ -120,7 +131,66 @@ services:
       - ./vision/recipes:/app/recipes:ro
     restart: unless-stopped
 
+  # --------------------------------------------------------------------
+  # Historian: TimescaleDB (Postgres + extension time-series)
+  # Schema nam o infra/db/init/, chay tu dong lan dau khi volume con rong.
+  # --------------------------------------------------------------------
+  timescaledb:
+    image: timescale/timescaledb:2.17.2-pg16
+    container_name: smart-factory-timescaledb
+    ports:
+      - '5432:5432'
+    environment:
+      POSTGRES_USER: factory
+      POSTGRES_PASSWORD: factory
+      POSTGRES_DB: factory
+      # Bat continuous aggregate + retention worker. Mac dinh cua image chi co
+      # 8 background worker; ba chinh sach cua schema nay can dat cho rieng.
+      TIMESCALEDB_TELEMETRY: 'off'
+    command:
+      - postgres
+      - -c
+      - timescaledb.max_background_workers=8
+      - -c
+      - max_worker_processes=16
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U factory -d factory']
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
+  # --------------------------------------------------------------------
+  # Backend MES + historian API
+  #   REST  :8002/api/...   work order, BOM, routing, genealogy, telemetry
+  #   WS    :8002/ws        trang thai day chuyen + OEE, thay cho simulator
+  # --------------------------------------------------------------------
+  mes:
+    build:
+      context: ./mes
+    container_name: smart-factory-mes
+    ports:
+      - '8002:8002'
+    environment:
+      DATABASE_URL: postgresql://factory:factory@timescaledb:5432/factory
+      MQTT_HOST: mosquitto
+      MQTT_PORT: '1883'
+      UNS_BASE: foxconn/hanoi/smt/line-1
+      LINE_TICK_MS: '1500'
+      LOG_LEVEL: INFO
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
+  timescale-data:
   openplc-data:
   openplc-core:
   mosquitto-data:

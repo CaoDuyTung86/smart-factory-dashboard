@@ -1,24 +1,33 @@
 # Hạ tầng IIoT
 
-Biến hai module của dashboard từ mô phỏng thành hàng thật: **PLC S7-1200** đọc
-một PLC đang chạy chương trình IEC 61131-3, và **Vision AOI** gửi ảnh cho một
-service OpenCV chấm điểm.
+Biến các module của dashboard từ mô phỏng thành hàng thật: **PLC S7-1200** đọc
+một PLC đang chạy chương trình IEC 61131-3, **Vision AOI** gửi ảnh cho một
+service OpenCV chấm điểm, và **SCADA / MES** đọc số liệu từ một backend có
+historian thật thay vì tự sinh trong trình duyệt.
 
 ```
   Trình duyệt
     │                                    │  HTTP POST :8001/inspect
     │  WebSocket ws://localhost:8000/ws  │  ┌──────────────────────┐
-    │                                    └──►  Vision AOI (OpenCV) │
-  ┌─▼───────────────────┐  MQTT :1883/WS :9001 └──────────────────┘
+    │  WebSocket ws://localhost:8002/ws  └──►  Vision AOI (OpenCV) │
+    │  HTTP      :8002/api/...              └──────────────────────┘
+  ┌─▼───────────────────┐  MQTT :1883/WS :9001
   │  Gateway (Python)   ├──────────────► Mosquitto ──► Node-RED / Grafana / …
-  └─────▲───────────────┘                (Unified Namespace)
-        │  Modbus TCP :502
-  ┌─────┴───────────────┐
-  │  OpenPLC Runtime    │  chạy infra/plc/conveyor.st
-  └─────────────────────┘  Web UI http://127.0.0.1:8081
+  └──▲───────────┬──────┘                (Unified Namespace)
+     │           │ asyncpg          ┌──────────────────────────┐
+     │           └─────────────────►│  TimescaleDB :5432       │
+     │  Modbus TCP :502             │  hypertable + 2 cagg     │
+  ┌──┴──────────────────┐           │  + schema MES            │
+  │  OpenPLC Runtime    │           └──────────▲───────────────┘
+  └─────────────────────┘                      │ asyncpg
+    chạy infra/plc/conveyor.st       ┌──────────┴───────────────┐
+    Web UI http://127.0.0.1:8081     │  Backend MES :8002       │
+                                     │  mô hình dây chuyền + OEE │
+                                     │  REST + WebSocket         │
+                                     └───────────────────────────┘
 ```
 
-Hai nhánh độc lập nhau: chạy được riêng từng cái, và thiếu cái nào thì module
+Các nhánh độc lập nhau: chạy được riêng từng cái, và thiếu cái nào thì module
 tương ứng trên web tự lui về chế độ mô phỏng.
 
 ## Chạy
@@ -42,6 +51,7 @@ Cuối cùng trỏ dashboard vào hạ tầng — tạo file `.env.local` ở g�
 ```
 VITE_PLC_GATEWAY_URL=http://localhost:8000
 VITE_VISION_API_URL=http://localhost:8001
+VITE_MES_API_URL=http://localhost:8002
 ```
 
 Chạy `pnpm dev`, mở tab **PLC S7-1200**: nhãn phải chuyển sang
@@ -59,6 +69,8 @@ mà không cần hạ tầng đi kèm.
 | Mosquitto MQTT/WebSocket | `9001` | cho mqtt.js trong trình duyệt |
 | Gateway REST/WebSocket | `8000` | `/health`, `/state`, `/command`, `/ws` |
 | Vision AOI | `8001` | `/health`, `/recipes`, `/inspect`, `/samples` |
+| TimescaleDB | `5432` | `factory` / `factory` / db `factory` |
+| Backend MES | `8002` | `/health`, `/api/...`, `/ws` |
 
 Web UI dùng 8081 chứ không phải 8080 vì 8080 là cổng bị tranh chấp nhất trên
 máy dev (Jenkins, Tomcat…). Dùng `127.0.0.1` thay vì `localhost`: nếu có tiến
@@ -223,15 +235,197 @@ lệch trong dung sai thì không bị loại oan, và schema JSON đúng cái f
 (frontend không kiểm tra kiểu lúc chạy — đổi tên một trường là bảng điều khiển
 im lặng hỏng chứ không báo lỗi).
 
+
+---
+
+# Historian & Backend MES
+
+`db/` là schema TimescaleDB, `mes/` là backend FastAPI. Hai thứ này trả lời hai
+câu hỏi mà bản chỉ chạy trong trình duyệt không trả lời được: *"số liệu 3 tiếng
+trước thế nào"* và *"bo mạch này dùng lô linh kiện nào"*.
+
+## Vì sao TimescaleDB chứ không phải một bảng Postgres thường
+
+Telemetry chỉ ghi thêm, truy vấn gần như luôn có điều kiện thời gian, và lớn
+rất nhanh: 5 tag × 4 máy × 1 điểm/1.5s ≈ **800 nghìn dòng/ngày**. TimescaleDB
+chia bảng thành chunk theo thời gian, nên xoá dữ liệu cũ là drop chunk chứ
+không phải `DELETE` quét cả bảng, và nén được theo cột với tỉ lệ ~10–20 lần.
+
+Ba tầng dữ liệu, mỗi tầng một tuổi thọ:
+
+| Bảng | Nội dung | Giữ | Dùng khi |
+|---|---|---|---|
+| `telemetry` | điểm thô, ~1.5s một điểm | 30 ngày (nén sau 7 ngày) | khoảng ≤ 2 giờ |
+| `telemetry_1m` | continuous aggregate 1 phút | 1 năm | khoảng ≤ 7 ngày |
+| `telemetry_1h` | cagg 1 giờ, dựng từ cagg 1 phút | 5 năm | khoảng > 7 ngày |
+
+Backend tự chọn tầng theo độ dài khoảng thời gian (`choose_resolution`). Một
+biểu đồ 30 ngày đọc bảng thô là ~1,7 triệu dòng cho một tag; đọc cagg 1 giờ là
+720 dòng. Nhìn trên màn hình gần như giống nhau, chi phí khác nhau ba bậc.
+
+**Cagg giữ cả min/max chứ không chỉ avg.** Trung bình 1 phút làm biến mất đúng
+cái gai nhọn cần nhìn thấy; biểu đồ downsample mà bỏ dải min–max là nói dối về
+dữ liệu.
+
+## Trung bình của trung bình là sai
+
+Cagg 1 giờ được dựng từ cagg 1 phút (hierarchical continuous aggregate) — rẻ
+hơn quét lại bảng gốc 60 lần. Nhưng `avg(avg_value)` chỉ đúng khi mọi bucket
+con có cùng số mẫu, mà điều đó không đúng: mất kết nối PLC 40 giây thì bucket
+phút đó chỉ còn 13 mẫu thay vì 40.
+
+Vì vậy cagg lưu **tổng có trọng số**, còn view bên trên mới chia ra:
+
+```sql
+weighted_sum / sample_count   -- không phải avg(avg_value)
+```
+
+Chênh lệch có thật, đo được ngay trên máy:
+
+```
+bucket 01:19  avg 52.35  (6 mẫu)     avg(avg) = 52.287
+bucket 01:20  avg 52.54  (39 mẫu)    có trọng số = 52.371
+bucket 01:21  avg 51.97  (16 mẫu)
+```
+
+## Bảng MES
+
+```
+product ──┬── bom_item          cái gì phải có, ở vị trí nào (ref_des)
+          └── routing_step      thứ tự trạm bắt buộc
+
+work_order ── unit ──┬── unit_step       một lần đi qua một trạm (có attempt)
+                     ├── unit_material   ◄── GENEALOGY: lô nào vào bo mạch nào
+                     └── defect
+
+material_lot ────────┘
+```
+
+`unit_material` là bảng đáng giá nhất ở đây. Nó cho phép trả lời cả hai chiều:
+
+- **Xuôi** — `GET /api/units/{serial}`: bo mạch này đã ăn những lô nào.
+- **Ngược (thu hồi)** — `GET /api/lots/{lot}/impact`: lô này đã đi vào những
+  bo mạch nào, đang ở đâu.
+
+Dữ liệu mẫu dựng sẵn một tình huống có thật: lô tụ `LOT-CAP-2609-B` bị nhà cung
+cấp báo lỗi sau khi đã giao hàng. Truy vấn thu hồi trả về **20 bo mạch, trong
+đó 14 đã PASS toàn bộ AOI**. Đó chính là lý do genealogy phải tồn tại độc lập
+với kết quả kiểm tra: "đã PASS" không đồng nghĩa "ngoài diện thu hồi". Serial
+`FOX-APPLE-M3-90821` (serial mặc định trên giao diện) được chọn có chủ đích —
+nó PASS mọi trạm và vẫn nằm trong diện thu hồi.
+
+## Backend MES làm gì
+
+```
+line_loop   đẩy mô hình dây chuyền 1.5s/lần → ghi historian → phát WebSocket
+historian   gom điểm đo thành lô rồi COPY xuống hypertable
+mqtt        nghe bộ đếm sản lượng của PLC thật trên Unified Namespace
+```
+
+Đây là điểm chuyển quan trọng nhất của đợt này: **nguồn dữ liệu SCADA chuyển
+từ trình duyệt xuống server.** Trước đó mỗi tab tự sinh số riêng, nên hai người
+xem thấy hai dây chuyền khác nhau và F5 là mất sạch. Giờ chỉ có một vòng tick,
+ghi xuống DB, phát cho mọi trình duyệt — đúng quan hệ giữa SCADA server và HMI.
+
+Số liệu nhiệt độ/rung **vẫn là mô phỏng**. Cái thật ở đây là đường đi (tick →
+historian → WebSocket → nhiều client) và bộ đếm sản lượng của trạm SMT: khi
+gateway đang sống, trạm đó lấy số từ bộ đếm PLC thật, và payload đánh dấu
+`countSource: "plc"` thay vì `"model"` để không ai nhầm số suy ra với số đo được.
+
+Vài chi tiết đáng nói:
+
+- **Vòng tick không bao giờ chờ DB.** Điểm đo vào một hàng đợi có giới hạn, một
+  task riêng `COPY` xuống theo lô. `await INSERT` ngay trong tick là cách chắc
+  chắn nhất để biến một trục trặc của DB thành một trục trặc của SCADA.
+- **Hàng đợi tràn thì bỏ điểm cũ nhất và đếm lại**, rồi báo ra `/health`. Hàng
+  đợi không giới hạn chỉ đổi lỗi mất dữ liệu lấy lỗi hết RAM, và giấu mất nó
+  còn tệ hơn.
+- **Bộ đếm ca sống sót qua khởi động lại.** OEE là tỉ số của những con số cộng
+  dồn từ đầu ca; reset về 0 mỗi lần deploy lại thì con số vô nghĩa. Trạng thái
+  được ghi xuống `machine_shift_state` mỗi 20 tick và đọc lại lúc khởi động.
+- **Ngưỡng cảnh báo nằm ở bảng `asset`, không nằm trong code.** Lò reflow chạy
+  245°C là bình thường, máy gắn linh kiện 245°C là cháy. Đổi một ngưỡng là việc
+  của kỹ sư quy trình, không nên phải build lại frontend.
+- **Bộ đếm PLC tràn 16 bit không thành sản lượng âm.** 65535 → 0 là tràn thanh
+  ghi; mất kết nối rồi nối lại thì bộ đếm đã nhảy vài nghìn. Cả hai trường hợp
+  đều lấy lại mốc chứ không bơm con số đó vào sản lượng của một tick.
+
+## Gateway ghi gì xuống historian
+
+Gateway ghi tag PLC (`conveyor`, `red_tower`, `green_tower`, `part_count`,
+`estop`) dưới mã tài sản `CONVEYOR-01`, theo kiểu **báo cáo khi thay đổi**
+(exception reporting) chứ không phải mỗi vòng poll: băng tải đứng yên 10 phút
+không sinh ra 3.000 dòng giống hệt nhau. Cộng thêm một nhịp nền 30 giây để phân
+biệt "không đổi" với "mất kết nối", và một mốc `quality = 24` (BAD, theo tinh
+thần OPC StatusCode) tại thời điểm mất PLC — không có nó thì biểu đồ nối thẳng
+qua khoảng mất kết nối và trông như máy vẫn chạy bình thường suốt thời gian đó.
+
+Bỏ biến `DATABASE_URL` đi thì gateway chạy y hệt như trước, chỉ là không ghi gì.
+
+## Thử bằng dòng lệnh
+
+```bash
+curl -s http://127.0.0.1:8002/health
+curl -s "http://127.0.0.1:8002/api/units/FOX-APPLE-M3-90821"
+curl -s "http://127.0.0.1:8002/api/lots/LOT-CAP-2609-B/impact"
+curl -s "http://127.0.0.1:8002/api/telemetry?asset=SMT-LINE-01&metric=temperature&minutes=30"
+curl -s "http://127.0.0.1:8002/api/defects/pareto?hours=24"
+```
+
+Xem trực tiếp trong DB:
+
+```bash
+docker exec -it smart-factory-timescaledb psql -U factory -d factory
+```
+
+```sql
+-- Ba tầng dữ liệu
+SELECT count(*) FROM telemetry;
+SELECT count(*) FROM telemetry_1m;
+
+-- Chính sách vòng đời đang chạy
+SELECT proc_name, hypertable_name, schedule_interval
+FROM timescaledb_information.jobs ORDER BY job_id;
+
+-- Truy vấn thu hồi
+SELECT u.status, count(*) FROM unit_material um
+JOIN unit u USING (serial_number)
+WHERE um.lot_code = 'LOT-CAP-2609-B' GROUP BY 1;
+```
+
+Cagg được policy làm mới theo lịch (1 phút / 30 phút). Muốn thấy ngay thì gọi
+tay:
+
+```sql
+CALL refresh_continuous_aggregate('telemetry_1m', NULL, NULL);
+CALL refresh_continuous_aggregate('telemetry_1h_acc', NULL, NULL);
+```
+
+## Kiểm thử
+
+```bash
+cd infra/mes
+python -m venv .venv && . .venv/Scripts/activate   # Linux/macOS: . .venv/bin/activate
+pip install -r requirements.txt pytest httpx
+pytest
+```
+
+54 test, không cần DB: công thức OEE đối chiếu cùng ví dụ mẫu với bản
+TypeScript, mô hình dây chuyền chạy với `random.Random(seed)` nên lặp lại được,
+historian kiểm chính sách chọn bảng và hành vi khi hàng đợi tràn, và bộ đếm PLC
+kiểm các trường hợp tràn thanh ghi / mất kết nối.
+
 ---
 
 ## Bảo mật
 
-Toàn bộ stack này mở: MQTT ẩn danh, CORS `*` (cả gateway lẫn vision), mật khẩu
-OpenPLC mặc định. Service vision nhận file tải lên không cần xác thực. Nó
-được thiết kế để chạy trên máy local hoặc mạng lab. Trước khi đưa ra ngoài phải
-bật `password_file` + TLS cho Mosquitto, khoá CORS theo origin, và đổi mật khẩu
-OpenPLC.
+Toàn bộ stack này mở: MQTT ẩn danh, CORS `*` (gateway, vision và MES), mật khẩu
+OpenPLC mặc định, và Postgres dùng `factory`/`factory` với cổng 5432 publish ra
+host. Service vision nhận file tải lên không cần xác thực; backend MES nhận
+lệnh WebSocket không xác thực — bất kỳ ai mở được cổng 8002 đều bấm được E-Stop.
+Nó được thiết kế để chạy trên máy local hoặc mạng lab. Trước khi đưa ra ngoài
+phải bật `password_file` + TLS cho Mosquitto, khoá CORS theo origin, xác thực
+lệnh điều khiển, đổi mật khẩu OpenPLC và Postgres, và bỏ publish cổng 5432.
 
 ## Dừng
 

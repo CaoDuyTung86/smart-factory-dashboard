@@ -8,6 +8,10 @@ nghiep, chuan hoa du lieu, roi day len lop tren. Ba dau ra song song:
              birth/death certificate bang LWT (y tuong muon tu Sparkplug B).
   2. WebSocket — cho trinh duyet doc truc tiep, khong can thu vien MQTT.
   3. REST  — POST /command de HMI ghi nguoc xuong PLC.
+  4. Historian — ghi tag xuong TimescaleDB de con lich su dai hon mot phien
+             lam viec cua trinh duyet. Ghi theo kieu "bao cao khi thay doi"
+             (exception reporting) chu khong phai moi vong: bang tai dung yen
+             10 phut khong sinh ra 3.000 dong giong het nhau.
 
 Gateway khong bao gio tu chet khi PLC hoac broker roi mang: no bao trang thai
 DISCONNECTED va tu ket noi lai.
@@ -21,9 +25,12 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
+import asyncpg
 import paho.mqtt.client as mqtt
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -74,6 +81,23 @@ PULSE_WIDTH_S = 0.15
 
 HOLDING_PART_COUNT = 0  # %QW0
 COIL_READ_COUNT = 16
+
+# --------------------------------------------------------------------------
+# Historian
+# --------------------------------------------------------------------------
+
+# Bo trong bien nay thi gateway chay y het nhu truoc, chi la khong ghi gi
+# xuong DB — cung mot kieu xuong thang nhu PLC va vision.
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+HISTORIAN_ASSET_CODE = os.getenv("HISTORIAN_ASSET_CODE", "CONVEYOR-01")
+# Ghi lai mot lan sau moi khoang nay du khong co gi thay doi. Khong co no thi
+# mot tag dung yen ca ca se khong co diem nao trong ca do, va bieu do khong
+# phan biet duoc "dung yen" voi "mat ket noi".
+HEARTBEAT_S = float(os.getenv("HISTORIAN_HEARTBEAT_S", "30"))
+# StatusCode kieu OPC DA: gia tri doc duoc luc mat ket noi khong duoc phep lan
+# vao thong ke nhu mot gia tri tot.
+QUALITY_GOOD = 192
+QUALITY_BAD = 24
 
 
 # --------------------------------------------------------------------------
@@ -200,6 +224,127 @@ mqtt_bridge = MqttBridge()
 
 
 # --------------------------------------------------------------------------
+# Historian: ghi tag PLC xuong TimescaleDB
+# --------------------------------------------------------------------------
+
+
+class Historian:
+    """Ghi theo lo, khong bao gio chan vong doc Modbus.
+
+    Vong poll chay 200ms; mot INSERT dong bo trong do la cach chac chan nhat de
+    bien mot truc trac cua DB thanh mot truc trac cua SCADA. Diem do duoc bo vao
+    hang doi co gioi han roi mot task rieng do xuong bang COPY. Hang doi day thi
+    bo diem cu nhat va dem lai — mat du lieu co kiem soat, va co bao ra /health.
+    """
+
+    def __init__(self, dsn: str) -> None:
+        self.dsn = dsn
+        self.pool: asyncpg.Pool | None = None
+        self.buffer: deque[tuple[datetime, str, str, float, int]] = deque(maxlen=20000)
+        self.written = 0
+        self.dropped = 0
+        self.last_error: str | None = None
+        self._last_written: dict[str, float] = {}
+        self._last_seen_at: dict[str, float] = {}
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.dsn)
+
+    async def connect(self) -> None:
+        if not self.enabled:
+            return
+        try:
+            self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=3)
+            log.info("Historian da noi toi DB")
+        except Exception as exc:  # noqa: BLE001
+            self.last_error = str(exc)
+            log.warning("Historian khong noi duoc DB: %s", exc)
+
+    def record(self, metric: str, value: float, quality: int = QUALITY_GOOD) -> None:
+        """Bao cao khi thay doi (exception reporting).
+
+        Mot tag boolean dung yen ca ca ma van ghi 5 lan/giay se sinh ra hang
+        trieu dong giong het nhau. Historian cong nghiep nao cung ghi khi gia
+        tri doi, cong them mot nhip nen dinh ky de phan biet "khong doi" voi
+        "mat ket noi".
+        """
+        if not self.enabled:
+            return
+        now = time.time()
+        unchanged = self._last_written.get(metric) == value
+        fresh = now - self._last_seen_at.get(metric, 0.0) < HEARTBEAT_S
+        if unchanged and fresh and quality == QUALITY_GOOD:
+            return
+
+        if len(self.buffer) == self.buffer.maxlen:
+            self.dropped += 1
+        self.buffer.append(
+            (datetime.now(timezone.utc), HISTORIAN_ASSET_CODE, metric, float(value), quality)
+        )
+        self._last_written[metric] = value
+        self._last_seen_at[metric] = now
+
+    def mark_disconnected(self) -> None:
+        """Danh dau mot moc chat luong xau khi mat PLC.
+
+        Khong lam viec nay thi bieu do noi thang qua khoang mat ket noi va nhin
+        nhu may van chay binh thuong suot thoi gian do.
+        """
+        for metric in list(self._last_written):
+            self.record(metric, self._last_written[metric], QUALITY_BAD)
+        self._last_written.clear()
+
+    async def flush(self) -> None:
+        if not self.buffer or self.pool is None:
+            return
+        batch = [self.buffer.popleft() for _ in range(len(self.buffer))]
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.copy_records_to_table(
+                    "telemetry",
+                    records=batch,
+                    columns=["ts", "asset_code", "metric", "value", "quality"],
+                )
+        except Exception as exc:  # noqa: BLE001
+            space = (self.buffer.maxlen or 0) - len(self.buffer)
+            if space < len(batch):
+                self.dropped += len(batch) - space
+                batch = batch[len(batch) - space :]
+            self.buffer.extendleft(reversed(batch))
+            self.last_error = str(exc)
+            log.warning("Ghi telemetry that bai: %s", exc)
+            return
+        self.written += len(batch)
+        self.last_error = None
+
+    async def run(self) -> None:
+        await self.connect()
+        while True:
+            await asyncio.sleep(1.0)
+            await self.flush()
+
+    async def close(self) -> None:
+        await self.flush()
+        if self.pool is not None:
+            await self.pool.close()
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "connected": self.pool is not None,
+            "assetCode": HISTORIAN_ASSET_CODE,
+            "queued": len(self.buffer),
+            "written": self.written,
+            "dropped": self.dropped,
+            "lastError": self.last_error,
+        }
+
+
+historian = Historian(DATABASE_URL)
+
+
+# --------------------------------------------------------------------------
 # Vong doc Modbus
 # --------------------------------------------------------------------------
 
@@ -276,9 +421,16 @@ async def poll_loop() -> None:
             state.part_count = part_count
             state.error = None
             backoff = 1.0
+
+            historian.record("conveyor", int(outputs["conveyor"]))
+            historian.record("red_tower", int(outputs["red_tower"]))
+            historian.record("green_tower", int(outputs["green_tower"]))
+            historian.record("part_count", part_count)
+            historian.record("estop", int(commands["estop"]))
         except Exception as exc:  # noqa: BLE001
             if state.connected or state.error is None:
                 log.warning("Mat ket noi PLC: %s", exc)
+                historian.mark_disconnected()
             state.connected = False
             state.error = str(exc)
             await link.close()
@@ -345,6 +497,8 @@ async def on_startup() -> None:
         asyncio.create_task(poll_loop()),
         asyncio.create_task(command_loop(queue)),
     ]
+    if historian.enabled:
+        app.state.tasks.append(asyncio.create_task(historian.run()))
     log.info("Gateway san sang — PLC %s:%s, UNS '%s'", PLC_HOST, PLC_PORT, UNS_BASE)
 
 
@@ -353,6 +507,7 @@ async def on_shutdown() -> None:
     for task in getattr(app.state, "tasks", []):
         task.cancel()
     mqtt_bridge.stop()
+    await historian.close()
     await link.close()
 
 
@@ -364,6 +519,7 @@ async def health() -> dict[str, Any]:
         "mqttConnected": mqtt_bridge.connected,
         "uns": UNS_BASE,
         "error": state.error,
+        "historian": historian.payload(),
     }
 
 

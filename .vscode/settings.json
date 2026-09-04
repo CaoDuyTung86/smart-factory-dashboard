@@ -8,5 +8,9 @@
     "tdClassName:\\s*'([^']*)'",
     "thClassName:\\s*\"([^\"]*)\"",
     "thClassName:\\s*'([^']*)'"
-  ]
+  ],
+  // SpecStory: tắt hẳn cho workspace này. cloudSync chặn đồng bộ lên cloud,
+  // autoSave chặn việc ghi lịch sử chat vào .specstory/ trong repo.
+  "specstory.cloudSync.enabled": "never",
+  "specstory.autoSave.enabled": false
 }

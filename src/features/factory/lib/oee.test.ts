@@ -6,7 +6,7 @@ const HOUR = 3_600_000
 
 function machine(overrides: Partial<Machine> = {}): Machine {
   return {
-    id: 'm1',
+    id: 'SMT-LINE-01',
     name: 'Test Cell',
     code: 'TEST-01',
     category: 'Assembly',

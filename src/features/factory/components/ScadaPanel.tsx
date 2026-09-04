@@ -1,7 +1,7 @@
 import { memo } from 'react'
 import { useFactoryStore } from '../hooks/use-factory-store'
 import { formatDuration } from '../lib/format'
-import { sensorSimulator } from '../services/sensorSimulator'
+import { factorySource } from '../services/factorySource'
 import { AlarmTable } from './AlarmTable'
 import { ControlPanel } from './ControlPanel'
 import { MachineCard } from './MachineCard'
@@ -13,12 +13,12 @@ import { TelemetryChart } from './TelemetryChart'
 const triggerFault = (
   machineId: string,
   faultType: 'overheat' | 'vibration' | 'emergency_stop'
-) => sensorSimulator.triggerFault(machineId, faultType)
+) => factorySource.triggerFault(machineId, faultType)
 const repairMachine = (machineId: string) =>
-  sensorSimulator.repairMachine(machineId)
+  factorySource.repairMachine(machineId)
 const acknowledgeAlarm = (alarmId: string) =>
-  sensorSimulator.acknowledgeAlarm(alarmId)
-const resetAll = () => sensorSimulator.resetAll()
+  factorySource.acknowledgeAlarm(alarmId)
+const resetAll = () => factorySource.resetAll()
 
 /**
  * Each section subscribes to the slice it draws. A tick that only changes

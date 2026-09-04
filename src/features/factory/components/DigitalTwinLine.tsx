@@ -10,7 +10,7 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { useFactoryStore } from '../hooks/use-factory-store'
-import { sensorSimulator } from '../services/sensorSimulator'
+import { factorySource } from '../services/factorySource'
 import type { FeedDensity } from '../types'
 
 interface StationInfo {
@@ -225,8 +225,8 @@ export function DigitalTwinLine() {
   }
 
   const handleAutoOptimize = () => {
-    sensorSimulator.setLineSpeed(1.2)
-    sensorSimulator.setFeedDensity('NORMAL')
+    factorySource.setLineSpeed(1.2)
+    factorySource.setFeedDensity('NORMAL')
   }
 
   const stations = useMemo(
@@ -308,7 +308,7 @@ export function DigitalTwinLine() {
                 step='0.1'
                 value={lineSpeed}
                 onChange={(e) =>
-                  sensorSimulator.setLineSpeed(parseFloat(e.target.value))
+                  factorySource.setLineSpeed(parseFloat(e.target.value))
                 }
                 className='w-full cursor-pointer accent-primary'
               />
@@ -332,7 +332,7 @@ export function DigitalTwinLine() {
                     size='sm'
                     variant={feedDensity === d ? 'default' : 'outline'}
                     className='h-7 flex-1 px-1 text-[10px]'
-                    onClick={() => sensorSimulator.setFeedDensity(d)}
+                    onClick={() => factorySource.setFeedDensity(d)}
                   >
                     {d === 'LOW' ? 'Thưa' : d === 'NORMAL' ? 'Vừa' : 'Dày'}
                   </Button>

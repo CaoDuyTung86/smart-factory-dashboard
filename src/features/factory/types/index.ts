@@ -20,6 +20,13 @@ export interface Machine {
    * factor: Performance = (idealCycleSec x totalCount) / runTime.
    */
   idealCycleSec: number
+  /**
+   * Where the unit count came from: 'plc' means a real PLC counter, 'model'
+   * means the figure was generated. Absent when the browser simulator produced
+   * the record. Stated explicitly so nobody reads a modelled count as a
+   * measured one.
+   */
+  countSource?: 'plc' | 'model'
   /** Accumulated time in a producing state (ms) — OEE Availability numerator. */
   runTimeMs: number
   /** Accumulated stopped time inside planned production time (ms). */
@@ -52,7 +59,11 @@ export interface AlarmEvent {
   unit: string
 }
 
-/** Everything a UI component can read from the simulator. */
+/**
+ * Everything a UI component can read about the line, whatever produced it —
+ * the browser simulator or the MES backend. The audible-alarm setting is
+ * deliberately not here: that belongs to the operator station, not to the line.
+ */
 export interface FactoryState {
   machines: Machine[]
   telemetryHistory: Record<string, TelemetryPoint[]>
@@ -60,7 +71,6 @@ export interface FactoryState {
   oee: OeeMetrics
   lineSpeed: number
   feedDensity: FeedDensity
-  audioEnabled: boolean
 }
 
 /** Normalised to the board image (0..1) so boxes track any image size. */

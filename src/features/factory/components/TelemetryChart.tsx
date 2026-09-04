@@ -31,14 +31,14 @@ export const TelemetryChart = memo(function TelemetryChart({
   telemetryHistory,
 }: TelemetryChartProps) {
   const [selectedMachineId, setSelectedMachineId] = useState<string>(
-    machines[0]?.id || 'm1'
+    machines[0]?.id || 'SMT-LINE-01'
   )
   const [activeMetric, setActiveMetric] = useState<'temp' | 'vibration'>('temp')
 
   const data = telemetryHistory[selectedMachineId] || []
 
   // Thresholds based on selected machine & metric
-  const tempThreshold = selectedMachineId === 'm2' ? 280 : 80
+  const tempThreshold = selectedMachineId === 'REFLOW-OVEN-02' ? 280 : 80
   const vibThreshold = 5.0
 
   return (

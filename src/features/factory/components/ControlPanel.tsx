@@ -34,7 +34,7 @@ export function ControlPanel({
             size='sm'
             variant='outline'
             className='gap-1.5 border-amber-500/30 text-xs text-amber-500 hover:bg-amber-500/10'
-            onClick={() => onTriggerFault('m1', 'overheat')}
+            onClick={() => onTriggerFault('SMT-LINE-01', 'overheat')}
           >
             <Flame className='h-3.5 w-3.5' /> Lỗi SMT Overheat
           </Button>
@@ -43,7 +43,7 @@ export function ControlPanel({
             size='sm'
             variant='outline'
             className='gap-1.5 border-blue-400/30 text-xs text-blue-400 hover:bg-blue-400/10'
-            onClick={() => onTriggerFault('m3', 'vibration')}
+            onClick={() => onTriggerFault('CNC-MILL-03', 'vibration')}
           >
             <Activity className='h-3.5 w-3.5' /> Lỗi CNC Rung Lắc
           </Button>
@@ -52,7 +52,7 @@ export function ControlPanel({
             size='sm'
             variant='destructive'
             className='gap-1.5 text-xs'
-            onClick={() => onTriggerFault('m2', 'emergency_stop')}
+            onClick={() => onTriggerFault('REFLOW-OVEN-02', 'emergency_stop')}
           >
             <AlertOctagon className='h-3.5 w-3.5' /> Dừng Khẩn Cấp (E-Stop)
           </Button>

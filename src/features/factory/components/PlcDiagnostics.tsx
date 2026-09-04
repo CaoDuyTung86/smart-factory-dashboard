@@ -35,7 +35,7 @@ const TEMP_SENSOR_SPAN_C = 100
 
 const AnalogInputs = memo(function AnalogInputs() {
   const machines = useFactoryStore((s) => s.machines)
-  const smt = machines.find((m) => m.id === 'm1')
+  const smt = machines.find((m) => m.id === 'SMT-LINE-01')
   const tempC = smt?.temperature ?? 0
   const rawCounts = Math.round(
     (tempC / TEMP_SENSOR_SPAN_C) * SIEMENS_FULL_SCALE
