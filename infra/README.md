@@ -417,6 +417,194 @@ kiểm các trường hợp tràn thanh ghi / mất kết nối.
 
 ---
 
+# Quản lý cảnh báo — ANSI/ISA-18.2
+
+Bản trước chỉ có một bảng `alarm_event` với một cờ `acknowledged`. Bảng đó đã bị
+bỏ — không phải vì nó sai, mà vì nó trả lời được đúng một câu hỏi ("hiện có gì
+đang kêu") trong khi một hệ cảnh báo phải trả lời được ba. Ba câu hỏi thành ba
+bảng, và ba tuổi thọ khác nhau:
+
+| Bảng               | Trả lời                                              | Sống cùng           |
+| ------------------ | ---------------------------------------------------- | ------------------- |
+| `alarm_definition` | Vì sao cảnh báo này tồn tại, người vận hành làm gì?   | hồ sơ thiết bị      |
+| `alarm_transition` | Nó đã đi qua trạng thái nào, lúc nào, do ai?          | hồ sơ kiểm toán     |
+| `alarm_state`      | Ngay bây giờ nó ở đâu (và sống sót qua restart chưa)? | phiên chạy hiện tại |
+
+## Bảy trạng thái, và trạng thái hay bị bỏ quên
+
+```
+                 điều kiện đúng            xác nhận
+      NORMAL ────────────────────► UNACK_ALM ────────► ACKED_ALM
+        ▲                            │                    │
+        │  xác nhận                  │ điều kiện hết       │ điều kiện hết
+        │                            ▼                    │
+        └──────────────────────  RTN_UNACK ◄──────────────┘
+                                     │  điều kiện quay lại
+                                     └──────────► UNACK_ALM
+
+   SHELVED · SUPPRESSED_BY_DESIGN · OUT_OF_SERVICE — ba đường tới cùng một
+   sự im lặng, cố ý tách ba vì ai có quyền bật/tắt chúng là khác nhau.
+```
+
+**`RTN_UNACK` là trạng thái đáng giá nhất.** Sự cố xảy ra rồi tự hết trong ba
+giây; nếu hệ thống chỉ có một cờ boolean thì không còn dấu vết nào trên màn
+hình. Mà đúng loại sự cố thoáng qua đó mới là loại hay lặp lại — nó sẽ quay lại
+vào ca đêm khi không ai ngồi đấy.
+
+**Ba trạng thái im lặng không được gộp làm một.** Shelve là người vận hành, tạm
+thời, **có hạn giờ và tự bật lại**. Suppress là logic thiết kế (không báo áp
+suất thấp khi bơm đang tắt). Out-of-service là bảo trì. Gộp lại là mất khả năng
+trả lời "ai đã tắt cái này, theo thẩm quyền nào". Cả ba đều hiện trong danh sách
+riêng **trong cùng gói tin WebSocket** — tắt một cảnh báo mà không có chỗ nào
+nhìn lại được thì đúng là đã xoá nó.
+
+## Chống chattering: hai cơ chế, hai bệnh
+
+| Cơ chế       | Chữa bệnh                                | Không chữa được |
+| ------------ | ---------------------------------------- | --------------- |
+| Deadband     | giá trị dao động **quanh đúng setpoint** | xung nhọn       |
+| On/off-delay | giá trị **nhảy vọt rồi về ngay**         | dao động chậm   |
+
+**Deadband chỉ nới rộng phía TẮT.** Cảnh báo HI bật tại `value > setpoint` nhưng
+chỉ tắt khi `value < setpoint − deadband`. Làm ngược lại (bật tại
+`setpoint + deadband`) là lỗi hay gặp, và nó làm chậm đúng cái cảnh báo mà kỹ sư
+vừa đặt setpoint cho: người ta chọn 75 độ vì 75 độ là ngưỡng, không phải 78.
+
+**Bộ đếm on-delay tính lại từ đầu mỗi lần điều kiện đổi chiều** — đó chính là lý
+do một xung thoáng qua không bao giờ chạm tới ngưỡng. Một xung rung 0.2 giây vọt
+lên gấp đôi ngưỡng thì deadband bao nhiêu cũng không chặn nổi.
+
+Độ trễ trong cấu hình mẫu cố ý **không đối xứng** và **khác nhau theo loại tín
+hiệu**:
+
+| Cảnh báo    | on-delay | off-delay | Vì sao                                                             |
+| ----------- | -------- | --------- | ------------------------------------------------------------------ |
+| `TEMP.HI`   | 6s       | 10s       | nhiệt độ có quán tính; xung 1.5 giây gần như luôn là nhiễu cảm biến |
+| `TEMP.HIHI` | 2s       | 30s       | muốn biết thật nhanh, nhưng không nhấp nháy khi máy nguội chậm      |
+| `VIB.HI`    | 10s      | 15s       | rung là tín hiệu xung — xe nâng đi ngang cũng làm kim nhảy          |
+| `ESTOP`     | 0s       | 0s        | **không bao giờ trễ một cảnh báo an toàn**                          |
+
+Quy tắc cuối được chặn ở **cả hai tầng**: `AlarmDefinition.__post_init__` ném lỗi
+ngay khi dựng, và bảng có `CONSTRAINT alarm_safety_khong_duoc_tre`. Lặp lại là
+cố ý — bảng đó là chỗ kỹ sư quy trình sửa bằng tay bằng SQL, không phải chỉ qua
+mã nguồn Python.
+
+## Rationalization: cảnh báo nào không có hành động thì không phải cảnh báo
+
+`alarm_definition` lưu ba cột mà ISA-18.2 bắt buộc phải có: `consequence`,
+`operator_response`, `response_time_sec`. Mức ưu tiên được **suy ra** từ chúng
+(hậu quả nặng + thời gian phản ứng ngắn = ưu tiên cao), nên lưu mức ưu tiên mà
+không lưu căn cứ thì lần sau không ai rà soát lại được.
+
+Chính quy tắc "không điền nổi `operator_response` thì đây không phải cảnh báo"
+đã **loại bỏ cảnh báo `Line Speed Overclocked`** của bản trước: người vận hành
+vừa tự tay kéo thanh trượt lên 2.5x, báo lại cho họ điều họ vừa làm là một sự
+kiện, không phải một cảnh báo. Thay vào đó, đẩy dây nhanh làm máy nóng lên (theo
+tỉ lệ **dư địa nhiệt của chính máy đó** — lò reflow còn 17 độ, máy gắn linh kiện
+còn 22 độ) và ăn thêm điện. Hậu quả đo được, và chính nó kích cảnh báo.
+
+Cấu hình sinh từ bảng `asset` bằng `INSERT ... SELECT`, không gõ lại tay từng
+con số: ngưỡng nằm ở hồ sơ thiết bị, cảnh báo chỉ trỏ tới nó.
+
+## Cảnh báo không phải interlock
+
+Trạng thái máy do **điều kiện quá trình** quyết định (nhiệt độ vượt tới hạn thì
+dừng, E-Stop thì dừng); `AlarmEngine` chỉ **quan sát** cùng những số đo đó rồi
+báo cho người. Để trạng thái máy bám theo trạng thái cảnh báo thì một off-delay
+30 giây đặt để chống nhấp nháy sẽ biến thành 30 giây máy không chịu chạy lại sau
+khi đã sửa xong. Trong nhà máy thật, cắt điện là việc của mạch an toàn và của
+PLC; màn hình cảnh báo không điều khiển gì cả.
+
+Hệ quả trực tiếp: **`repair()` không xác nhận hộ cảnh báo.** Sửa máy là hành
+động vật lý, xác nhận là hành động của người vận hành. Gộp hai việc lại thì
+`RTN_UNACK` không còn lý do tồn tại.
+
+## Chỉ số hiệu năng (điều 16 / EEMUA 191)
+
+`GET /api/alarms/performance?hours=24` trả về bảng chỉ số kèm **phán định
+đạt/không đạt** theo chỉ tiêu công bố của tiêu chuẩn:
+
+| Chỉ số                               | Chỉ tiêu                    |
+| ------------------------------------ | --------------------------- |
+| Cảnh báo trung bình / 10 phút        | ≤ 1 (tối đa quản lý nổi ≤ 2) |
+| Đỉnh trong một khoảng 10 phút        | ≤ 10                        |
+| % khoảng 10 phút bị alarm flood      | ≤ 1%                        |
+| % tải do 10 tag kêu nhiều nhất       | ≤ 5%                        |
+| Chattering (≥3 lần kêu trong 1 phút) | 0                           |
+| Stale (kêu liên tục > 24 giờ)        | < 5                         |
+| Phân bố ưu tiên                      | ~80 / 15 / 5 / <1           |
+| Shelve không ghi lý do               | 0                           |
+
+Ba điểm đáng nói về cách tính:
+
+- **Mẫu số là toàn bộ thời gian của cửa sổ**, kể cả những khoảng 10 phút không
+  có cảnh báo nào. Bỏ khoảng rỗng đi là cách dễ nhất để một hệ thống đang ngồi
+  trên một trận cảnh báo vẫn báo cáo đẹp.
+- **Chattering dùng cửa sổ TRƯỢT 60 giây**, không cắt khúc theo phút. Ba lần kêu
+  lúc 10:00:59, 10:01:00, 10:01:01 là chattering thật, nhưng cắt khúc theo phút
+  sẽ thấy "1 lần rồi 2 lần" và không báo gì.
+- **Mọi chỉ số tính từ `alarm_transition`**, không từ danh sách đang sống: danh
+  sách đang sống không nhớ gì về cái vừa tắt một giây trước, mà chattering thì
+  chỉ nhìn thấy trong lịch sử.
+
+`alarm_transition` **chép** `priority` / `alarm_class` / `message` vào từng dòng
+thay vì join sang cấu hình. Lần sau kỹ sư hạ một cảnh báo từ HIGH xuống LOW,
+lịch sử vẫn phải nói rằng lúc đó nó là HIGH — nếu join, mọi biểu đồ xu hướng sẽ
+tự viết lại quá khứ mỗi lần cấu hình đổi. Cũng vì vậy `tag` **không** có khoá
+ngoại tới `alarm_definition`: hồ sơ kiểm toán phải sống sót khi một cảnh báo bị
+gỡ khỏi cấu hình.
+
+Bảng này là bảng thường, không phải hypertable, và **không có chính sách xoá**:
+telemetry thô sống 30 ngày vì nó là một dãy số lặp lại, còn nhật ký cảnh báo là
+hồ sơ vận hành.
+
+## Thử bằng dòng lệnh
+
+```bash
+curl -s "http://127.0.0.1:8002/api/alarms"
+curl -s "http://127.0.0.1:8002/api/alarms/definitions"
+curl -s "http://127.0.0.1:8002/api/alarms/performance?hours=24"
+curl -s "http://127.0.0.1:8002/api/alarms/journal?hours=8&limit=50"
+```
+
+```sql
+-- Một lần kêu, gom từ nhật ký: kêu lúc nào, ai xác nhận, bao lâu mới hết
+SELECT tag, raised_at, acked_at, rtn_at FROM alarm_occurrence
+ORDER BY raised_at DESC LIMIT 20;
+
+-- Bad actor trong 24 giờ
+SELECT tag, count(*) FROM alarm_transition
+WHERE to_state = 'UNACK_ALM' AND occurred_at >= now() - INTERVAL '24 hours'
+GROUP BY 1 ORDER BY 2 DESC LIMIT 10;
+
+-- Đang bị tắt tiếng
+SELECT tag, state, shelved_until, shelve_reason FROM alarm_state
+WHERE state IN ('SHELVED', 'SUPPRESSED_BY_DESIGN', 'OUT_OF_SERVICE');
+```
+
+> **Schema đã đổi.** Bảng `alarm_event` không còn; `alarm_definition`,
+> `alarm_transition` và `alarm_state` là bảng mới. Script trong `db/init/` chỉ
+> chạy trên volume rỗng, nên volume cũ phải xoá:
+> `docker compose -f infra/docker-compose.yml down -v` rồi `up -d`.
+
+## Kiểm thử
+
+```bash
+cd infra/mes && python -m pytest        # gồm test_alarms.py + test_alarm_metrics.py
+```
+
+Máy trạng thái đi qua thời gian bằng tham số `now` chứ không bằng `sleep`, nên
+một cảnh báo có on-delay 10 giây được kiểm tra trong 0 giây — đó là lý do
+`AlarmEngine` không bao giờ tự đọc đồng hồ hệ thống.
+
+Bản TypeScript (`src/features/factory/lib/isa18.ts`) là bản cài đặt **thứ hai**
+của cùng máy trạng thái, dùng khi chạy ngoại tuyến. `isa18.test.ts` là bản dịch
+từng ca của `test_alarms.py` — cùng số liệu, cùng mốc thời gian, cùng kết quả
+mong đợi. Hai bản lệch nhau một nhánh là lúc màn hình khi demo không còn là màn
+hình hệ thống thật tạo ra.
+
+---
+
 ## Bảo mật
 
 Toàn bộ stack này mở: MQTT ẩn danh, CORS `*` (gateway, vision và MES), mật khẩu

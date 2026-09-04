@@ -1,8 +1,9 @@
 """
 Backend MES + historian API.
 
-    REST  :8002/api/...   danh muc, work order, BOM, routing, genealogy, telemetry
-    WS    :8002/ws        trang thai day chuyen + OEE, phat moi tick
+    REST  :8002/api/...   danh muc, work order, BOM, routing, genealogy, telemetry,
+                          cau hinh + chi so hieu nang cua he canh bao (ISA-18.2)
+    WS    :8002/ws        trang thai day chuyen + OEE + canh bao, phat moi tick
 
 Dich vu nay la nguon su that cua tab SCADA. Frontend khong con tu sinh so lieu
 khi ket noi duoc toi day; khong ket noi duoc thi no quay ve simulator trong
@@ -34,9 +35,11 @@ from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnec
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+import alarm_metrics
 import repository as repo
+from alarms import AlarmEngine, definition_from_row, restore as restore_alarms
 from historian import Historian, choose_resolution, fetch_history, fetch_series, utcnow
-from line import LineModel, Machine
+from line import LineModel, Machine, readings_of
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -55,6 +58,11 @@ STATE_SAVE_EVERY = int(os.getenv("STATE_SAVE_EVERY_TICKS", "20"))
 
 # Cac tag duoc ghi vao historian moi tick.
 TELEMETRY_METRICS = ("temperature", "vibration", "power_kw", "output", "defects")
+
+# Ten nguoi thao tac. Chua co dang nhap, nhung cot `operator` cua nhat ky da
+# ton tai va duoc dien: them xac thuc sau nay la doi mot hang so nay, khong
+# phai sua lai luoc do bang va viet lai lich su.
+OPERATOR = os.getenv("OPERATOR_NAME", "hmi")
 
 
 # ---------------------------------------------------------------------------
@@ -76,10 +84,6 @@ class Runtime:
         self.started_at = time.time()
         self.tick_count = 0
         self.db_error: str | None = None
-        # Id cua nhung canh bao da ghi xuong DB. Khong the suy ra bang cach so
-        # danh sach truoc/sau moi tick: canh bao con phat sinh tu lenh cua HMI
-        # (bam nut E-Stop), va lenh do khong di qua vong tick.
-        self.persisted_alarms: set[str] = set()
 
     def take_plc_delta(self) -> int | None:
         """So san pham PLC dem duoc ke tu lan hoi truoc.
@@ -167,28 +171,21 @@ def json_safe(value):
 # ---------------------------------------------------------------------------
 
 
-async def persist_new_alarms() -> None:
-    """Ghi xuong DB moi canh bao chua tung duoc ghi.
+async def journal(transitions) -> None:
+    """Ghi cac chuyen trang thai canh bao xuong nhat ky.
 
-    Doi chieu voi mot tap id da ghi chu khong voi anh chup truoc do cua vong
-    tick: canh bao co the sinh ra tu lenh HMI (bam E-Stop) — lenh do xu ly
-    ngoai vong tick, nen so truoc/sau tick se bo sot dung nhung canh bao quan
-    trong nhat.
+    Loi ghi DB khong duoc phep lam gay vong tick — day chuyen van phai chay va
+    van phai phat cho cac HMI ke ca khi historian dang co van de. Nhung loi do
+    duoc ghi log va lo ra `/health`, khong nuot im.
     """
-    if rt.pool is None or rt.line is None:
+    if rt.pool is None or not transitions:
         return
-    for alarm in rt.line.alarms:
-        if alarm.id in rt.persisted_alarms:
-            continue
-        try:
-            await repo.persist_alarm(rt.pool, alarm)
-            rt.persisted_alarms.add(alarm.id)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("Ghi alarm_event that bai: %s", exc)
-    # Danh sach canh bao tren giao dien co tran (15 cai), tap id nay thi khong —
-    # cat theo dung nhung canh bao con song de no khong phinh mai.
-    if len(rt.persisted_alarms) > 256:
-        rt.persisted_alarms = {a.id for a in rt.line.alarms} & rt.persisted_alarms
+    try:
+        await repo.journal_transitions(rt.pool, transitions)
+        rt.db_error = None
+    except Exception as exc:  # noqa: BLE001
+        rt.db_error = str(exc)
+        log.warning("Ghi alarm_transition that bai: %s", exc)
 
 
 async def line_loop() -> None:
@@ -198,7 +195,7 @@ async def line_loop() -> None:
         now = utcnow()
         now_ms = int(now.timestamp() * 1000)
 
-        rt.line.tick(now_ms=now_ms, plc_produced=rt.take_plc_delta())
+        transitions = rt.line.tick(now_ms=now_ms, plc_produced=rt.take_plc_delta())
         rt.tick_count += 1
 
         for m in rt.line.machines:
@@ -208,17 +205,23 @@ async def line_loop() -> None:
             rt.historian.record(now, m.id, "output", m.output)
             rt.historian.record(now, m.id, "defects", m.defects)
 
-        await persist_new_alarms()
-        if rt.pool is not None:
-            if rt.tick_count % STATE_SAVE_EVERY == 0:
-                try:
-                    await repo.save_shift_state(rt.pool, rt.line.machines)
-                    rt.db_error = None
-                except Exception as exc:  # noqa: BLE001
-                    rt.db_error = str(exc)
-                    log.warning("Ghi machine_shift_state that bai: %s", exc)
+        # Nhat ky canh bao ghi NGAY, khong gom lo theo nhip nhu telemetry.
+        # Telemetry co the thua mot diem; mot chuyen trang thai canh bao thi
+        # khong — do la ho so noi ai biet chuyen gi vao luc nao.
+        await journal(transitions)
 
-        await broadcast({"type": "update", **rt.line.payload(), "serverTime": now_ms})
+        if rt.pool is not None and rt.tick_count % STATE_SAVE_EVERY == 0:
+            try:
+                await repo.save_shift_state(rt.pool, rt.line.machines)
+                await repo.save_alarm_state(rt.pool, rt.line.engine)
+                rt.db_error = None
+            except Exception as exc:  # noqa: BLE001
+                rt.db_error = str(exc)
+                log.warning("Ghi trang thai xuong DB that bai: %s", exc)
+
+        await broadcast(
+            {"type": "update", **rt.line.payload(now_ms), "serverTime": now_ms}
+        )
 
 
 class MqttListener:
@@ -312,13 +315,53 @@ app.add_middleware(
 )
 
 
+async def build_alarm_engine(pool) -> AlarmEngine:
+    """Dung `AlarmEngine` tu Master Alarm Database roi nap lai trang thai cu.
+
+    Cau hinh canh bao nam trong DB chu khong trong ma nguon: doi mot setpoint
+    la mot cau UPDATE cong mot lan khoi dong lai, khong phai mot lan build.
+    """
+    defs = await repo.load_alarm_definitions(pool)
+    if not defs:
+        raise RuntimeError("Bang alarm_definition rong — schema chua duoc nap")
+    engine = AlarmEngine([definition_from_row(row) for row in defs])
+
+    def epoch(value):
+        return None if value is None else value.timestamp()
+
+    restore_alarms(
+        engine,
+        {
+            row["tag"]: {
+                "state": row["state"],
+                "condition": row["raw_condition"],
+                "active": row["active"],
+                "raised_at": epoch(row["raised_at"]),
+                "acked_at": epoch(row["acked_at"]),
+                "rtn_at": epoch(row["rtn_at"]),
+                "shelved_until": epoch(row["shelved_until"]),
+                "shelve_reason": row["shelve_reason"],
+                "value": row["value"],
+            }
+            for row in await repo.load_alarm_state(pool)
+        },
+    )
+    return engine
+
+
 async def startup() -> None:
     rt.pool = await connect_pool()
     rows = await repo.load_shift_state(rt.pool)
     if not rows:
         raise RuntimeError("Bang asset/machine_shift_state rong — schema chua duoc nap")
 
-    rt.line = LineModel(machines=build_machines(rows), tick_ms=TICK_MS, rng=random.Random())
+    engine = await build_alarm_engine(rt.pool)
+    rt.line = LineModel(
+        machines=build_machines(rows),
+        engine=engine,
+        tick_ms=TICK_MS,
+        rng=random.Random(),
+    )
     rt.historian = Historian(rt.pool)
     listener = MqttListener()
     listener.start()
@@ -329,8 +372,9 @@ async def startup() -> None:
         asyncio.create_task(rt.historian.run()),
     ]
     log.info(
-        "MES san sang — %s may, tick %sms, DB %s",
+        "MES san sang — %s may, %s canh bao, tick %sms, DB %s",
         len(rt.line.machines),
+        len(engine.definitions),
         TICK_MS,
         DATABASE_URL.rsplit("@", 1)[-1],
     )
@@ -347,6 +391,11 @@ async def shutdown() -> None:
     if rt.line is not None and rt.pool is not None:
         with contextlib.suppress(Exception):
             await repo.save_shift_state(rt.pool, rt.line.machines)
+        # Trang thai canh bao phai duoc ghi o day chu khong chi moi 20 tick:
+        # dung container ngay sau khi ai do shelve mot canh bao thi han shelve
+        # do phai con nguyen luc bat lai.
+        with contextlib.suppress(Exception):
+            await repo.save_alarm_state(rt.pool, rt.line.engine)
     if rt.mqtt is not None:
         with contextlib.suppress(Exception):
             rt.mqtt.loop_stop()
@@ -459,10 +508,75 @@ async def get_defect_pareto(hours: int = Query(24, ge=1, le=24 * 90)) -> JSONRes
 
 
 # ---------------------------------------------------------------------------
+# Canh bao (ISA-18.2)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/alarms")
+async def get_alarms() -> dict:
+    """Anh chup canh bao hien tai, cho client khong mo WebSocket."""
+    if rt.line is None:
+        raise HTTPException(503, "Day chuyen chua khoi dong")
+    now_ms = int(time.time() * 1000)
+    payload = rt.line.payload(now_ms)
+    return {
+        "alarms": payload["alarms"],
+        "inhibitedAlarms": payload["inhibitedAlarms"],
+        "alarmCounts": payload["alarmCounts"],
+        "serverTime": now_ms,
+    }
+
+
+@app.get("/api/alarms/definitions")
+async def get_alarm_definitions() -> list[dict]:
+    """Master Alarm Database: moi canh bao kem can cu ton tai cua no.
+
+    Lo ra API vi cau hoi "vi sao cai nay keu, va toi phai lam gi trong bao lau"
+    phai tra loi duoc ngay tren man hinh nguoi van hanh. Bat ho di doc ma nguon
+    la mot cach chac chan de khong ai doc.
+    """
+    if rt.line is None:
+        raise HTTPException(503, "Day chuyen chua khoi dong")
+    return rt.line.engine.definition_rows()
+
+
+@app.get("/api/alarms/performance")
+async def get_alarm_performance(hours: int = Query(24, ge=1, le=24 * 30)) -> JSONResponse:
+    """Chi so hieu nang he canh bao theo ISA-18.2 dieu 16 / EEMUA 191."""
+    return JSONResponse(json_safe(await alarm_metrics.fetch(rt.pool, hours)))
+
+
+@app.get("/api/alarms/journal")
+async def get_alarm_journal(
+    hours: int = Query(8, ge=1, le=24 * 30),
+    limit: int = Query(200, ge=1, le=2000),
+    tag: str | None = Query(None),
+) -> JSONResponse:
+    return JSONResponse(json_safe(await alarm_metrics.journal(rt.pool, hours, limit, tag)))
+
+
+# ---------------------------------------------------------------------------
 # WebSocket
 # ---------------------------------------------------------------------------
 
-COMMANDS = {"setLineSpeed", "setFeedDensity", "triggerFault", "repair", "acknowledge", "reset"}
+COMMANDS = {
+    "setLineSpeed",
+    "setFeedDensity",
+    "triggerFault",
+    "repair",
+    "acknowledge",
+    "acknowledgeAsset",
+    "acknowledgeAll",
+    "shelve",
+    "unshelve",
+    "outOfService",
+    "reset",
+}
+
+# Han shelve toi da nguoi dung duoc phep xin. Con bi kep lan nua boi
+# `max_shelve_sec` cua chinh canh bao do trong Master Alarm Database — canh bao
+# an toan chi duoc 5 phut, va gioi han do nam o cau hinh chu khong o day.
+MAX_SHELVE_REQUEST_SEC = 8 * 3600
 
 
 @app.websocket("/ws")
@@ -474,8 +588,9 @@ async def websocket_endpoint(ws: WebSocket) -> None:
     rt.subscribers.add(ws)
     # Anh chup ngay khi ket noi: UI khong phai doi den tick ke tiep moi co gi
     # de ve.
+    now_ms = int(time.time() * 1000)
     await ws.send_text(
-        json.dumps({"type": "snapshot", **rt.line.payload(), "serverTime": int(time.time() * 1000)})
+        json.dumps({"type": "snapshot", **rt.line.payload(now_ms), "serverTime": now_ms})
     )
     try:
         while True:
@@ -498,39 +613,81 @@ async def handle_command(message: dict) -> None:
         log.warning("Lenh khong hop le: %s", name)
         return
 
+    now_ms = int(time.time() * 1000)
+    operator = str(message.get("operator") or OPERATOR)
+    transitions = []
+
     if name == "setLineSpeed":
         rt.line.set_line_speed(float(message.get("value", 1.0)))
     elif name == "setFeedDensity":
         rt.line.set_feed_density(str(message.get("value", "NORMAL")))
     elif name == "triggerFault":
+        # Chi dat may vao dieu kien hong. Canh bao (neu co) do AlarmEngine sinh
+        # ra o tick ke tiep, sau khi da di qua on-delay va deadband that su.
         rt.line.trigger_fault(str(message.get("machineId", "")), str(message.get("fault", "")))
     elif name == "repair":
-        machine_id = str(message.get("machineId", ""))
-        if rt.line.repair(machine_id) and rt.pool is not None:
-            with contextlib.suppress(Exception):
-                await repo.acknowledge_alarms(rt.pool, machine_id)
+        # Sua may KHONG xac nhan ho canh bao: xem ghi chu tren `LineModel.repair`.
+        rt.line.repair(str(message.get("machineId", "")))
     elif name == "acknowledge":
-        rt.line.acknowledge(str(message.get("alarmId", "")))
+        transitions = rt.line.acknowledge(str(message.get("tag", "")), now_ms, operator)
+    elif name == "acknowledgeAsset":
+        transitions = rt.line.acknowledge_asset(
+            str(message.get("machineId", "")), now_ms, operator
+        )
+    elif name == "acknowledgeAll":
+        transitions = rt.line.acknowledge_all(now_ms, operator)
+    elif name == "shelve":
+        seconds = max(60.0, min(float(message.get("seconds", 1800)), MAX_SHELVE_REQUEST_SEC))
+        transitions = rt.line.shelve(
+            str(message.get("tag", "")),
+            seconds,
+            reason=str(message.get("reason", "")).strip(),
+            operator=operator,
+            now_ms=now_ms,
+        )
+    elif name == "unshelve":
+        transitions = rt.line.unshelve(str(message.get("tag", "")), now_ms, operator)
+    elif name == "outOfService":
+        transitions = rt.line.set_out_of_service(
+            str(message.get("tag", "")), bool(message.get("value", True)), now_ms, operator
+        )
     elif name == "reset":
-        rt.line.alarms.clear()
-        rt.line.set_line_speed(1.0)
-        rt.line.set_feed_density("NORMAL")
-        rt.line.machines = [
-            dc_replace(
-                m,
-                status="running",
-                temperature=m.nominal_temp,
-                vibration=m.nominal_vibration,
-            )
-            for m in rt.line.machines
-        ]
-        if rt.pool is not None:
-            with contextlib.suppress(Exception):
-                await repo.acknowledge_alarms(rt.pool)
+        transitions = await reset_line(now_ms, operator)
 
-    await persist_new_alarms()
+    await journal(transitions)
     # Phat ngay chu khong doi tick ke tiep: nut bam phai phan hoi tuc thi.
-    await broadcast({"type": "update", **rt.line.payload(), "serverTime": int(time.time() * 1000)})
+    await broadcast({"type": "update", **rt.line.payload(now_ms), "serverTime": now_ms})
+
+
+async def reset_line(now_ms: int, operator: str) -> list:
+    """Dua day chuyen ve trang thai sach — nut cua ban demo.
+
+    KHONG xoa trang canh bao. Truoc day `reset` goi thang `alarms.clear()`, tuc
+    la mot nut lam bien mat moi bang chung ve nhung gi vua xay ra. O day no dua
+    dieu kien qua trinh ve binh thuong roi XAC NHAN toan bo canh bao — cung dan
+    toi mot man hinh sach, nhung moi buoc deu di qua may trang thai va deu de
+    lai mot dong trong nhat ky.
+    """
+    assert rt.line is not None
+    rt.line.set_line_speed(1.0)
+    rt.line.set_feed_density("NORMAL")
+    rt.line.machines = [
+        dc_replace(
+            m,
+            status="running",
+            temperature=m.nominal_temp,
+            vibration=m.nominal_vibration,
+            power_usage=m.nominal_power,
+            estop=False,
+        )
+        for m in rt.line.machines
+    ]
+    # Danh gia lai voi so do da ve binh thuong TRUOC khi xac nhan, de canh bao
+    # di qua may trang thai chu khong bi nhac thang ve NORMAL. Canh bao nao con
+    # trong off-delay thi van o trang thai "dang keu" them mot lat sau khi da
+    # xac nhan — dung nhu thiet ke, va do la ly do man hinh khong sach tuc thi.
+    transitions = rt.line.engine.evaluate(now_ms / 1000, readings_of(rt.line.machines))
+    return transitions + rt.line.acknowledge_all(now_ms, operator)
 
 
 __all__ = ["app", "build_machines", "json_safe", "rt"]

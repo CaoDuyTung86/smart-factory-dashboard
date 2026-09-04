@@ -189,6 +189,108 @@ export interface LotImpact {
   truncated: boolean
 }
 
+/**
+ * Chỉ số hiệu năng hệ cảnh báo — ISA-18.2 điều 16 / EEMUA 191.
+ *
+ * `verdicts` là phần đáng giá: mỗi chỉ số đi kèm chỉ tiêu công bố của tiêu
+ * chuẩn và một phán định đạt/không đạt. Một bảng chỉ số được chỉnh cho lúc nào
+ * cũng xanh thì không còn là chỉ số, nó là trang trí.
+ */
+export interface AlarmVerdict {
+  key: string
+  label: string
+  value: number
+  target: number
+  limit: number
+  status: 'ok' | 'warn' | 'bad'
+  note: string
+}
+
+export interface AlarmPerformance {
+  windowHours: number
+  bucketMinutes: number
+  annunciations: number
+  periods: number
+  rate: {
+    perTenMinAvg: number
+    perTenMinPeak: number
+    floodPeriods: number
+    floodPct: number
+    buckets: number[]
+  }
+  priorityDistribution: Array<{
+    priority: string
+    count: number
+    pct: number
+    targetPct: number
+  }>
+  badActors: Array<{
+    tag: string
+    assetCode: string
+    priority: string
+    message: string
+    count: number
+    pct: number
+  }>
+  topTenPct: number
+  chattering: Array<{ tag: string; message: string; maxPerMinute: number }>
+  stale: Array<{
+    tag: string
+    message: string
+    priority: string
+    raisedAt: number
+    hours: number
+  }>
+  ackResponse: {
+    count: number
+    medianSec: number | null
+    p90Sec: number | null
+  }
+  shelves: number
+  shelvesWithoutReason: number
+  verdicts: AlarmVerdict[]
+  overall: 'ok' | 'warn' | 'bad'
+}
+
+/** Một dòng của Master Alarm Database, đọc từ bảng `alarm_definition`. */
+export interface AlarmDefinitionRow {
+  tag: string
+  assetCode: string
+  metric: string
+  comparison: 'HI' | 'HIHI' | 'LO' | 'LOLO' | 'BOOL'
+  setpoint: number
+  deadband: number
+  onDelaySec: number
+  offDelaySec: number
+  priority: 'DIAGNOSTIC' | 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT'
+  alarmClass: string
+  message: string
+  unit: string
+  consequence: string
+  operatorResponse: string
+  responseTimeSec: number
+  maxShelveSec: number
+  enabled: boolean
+  state: string
+}
+
+export interface AlarmJournalEntry {
+  id: number
+  tag: string
+  assetCode: string
+  at: number
+  fromState: string
+  toState: string
+  cause: string
+  priority: string
+  alarmClass: string
+  message: string
+  value: number | null
+  unit: string
+  operator: string
+  note: string
+}
+
 export interface TelemetryHistory {
   /** 'raw' | '1m' | '1h' — backend tự chọn theo độ dài khoảng thời gian. */
   resolution: string
@@ -213,4 +315,12 @@ export const mesApi = {
     request<LotImpact>('/api/lots/' + encodeURIComponent(lot) + '/impact'),
   history: (minutes: number) =>
     request<TelemetryHistory>('/api/telemetry/history?minutes=' + minutes),
+  alarmDefinitions: () =>
+    request<AlarmDefinitionRow[]>('/api/alarms/definitions'),
+  alarmPerformance: (hours: number) =>
+    request<AlarmPerformance>('/api/alarms/performance?hours=' + hours),
+  alarmJournal: (hours: number, limit = 200) =>
+    request<AlarmJournalEntry[]>(
+      '/api/alarms/journal?hours=' + hours + '&limit=' + limit
+    ),
 }

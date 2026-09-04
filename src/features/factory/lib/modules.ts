@@ -1,4 +1,11 @@
-import { Camera, Cpu, Database, Factory, LayoutDashboard } from 'lucide-react'
+import {
+  BellRing,
+  Camera,
+  Cpu,
+  Database,
+  Factory,
+  LayoutDashboard,
+} from 'lucide-react'
 
 /**
  * The five shop-floor modules, in the order an operator walks the line.
@@ -13,6 +20,14 @@ export const factoryModules = [
     shortLabel: 'SCADA Command Center',
     icon: LayoutDashboard,
     iconClass: 'text-primary',
+  },
+  {
+    // Ngay sau SCADA: khi có gì kêu, đây là nơi người vận hành mở ra tiếp theo.
+    to: '/alarms',
+    label: 'Alarm Management ISA-18.2',
+    shortLabel: 'Alarm ISA-18.2',
+    icon: BellRing,
+    iconClass: 'text-destructive',
   },
   {
     to: '/twin',

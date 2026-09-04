@@ -4,7 +4,7 @@
 > cần thiết: dự án là gì, đã làm tới đâu, vì sao chọn cách đó, và việc tiếp theo
 > là gì. Đưa file này vào đầu chat mới là đủ để tiếp tục mà không phải kể lại.
 >
-> Cập nhật lần cuối: **2026-09-04** (đợt 6)
+> Cập nhật lần cuối: **2026-09-04** (đợt 7)
 
 ---
 
@@ -34,8 +34,9 @@ Ràng buộc: không gấp, làm vì đam mê, có một dự án khác đang ch
 | **Backend MES** | 🟢 **Thật** | FastAPI + asyncpg: work order, BOM, routing, genealogy hai chiều, truy vấn thu hồi theo lô |
 | **SCADA Command Center** | 🟡 Số liệu mô phỏng, **chạy ở server** | Một vòng tick duy nhất → historian → WebSocket cho mọi trình duyệt. Bộ đếm sản lượng trạm SMT lấy từ PLC thật khi gateway sống |
 | MES Traceability | 🟢 **Thật** | Đọc PostgreSQL; xuất CSV gồm cả lộ trình lẫn hệ phả vật tư |
+| **Quản lý cảnh báo** | 🟢 **Thật** | ANSI/ISA-18.2: máy trạng thái 7 trạng thái, deadband + on/off-delay, shelving có hạn, nhật ký kiểm toán, chỉ số hiệu năng theo điều 16 |
 | Digital Twin | 🟡 Mô phỏng | Đã tối ưu hiệu năng bằng rAF |
-| Kiểm thử | 🟢 **Có** | 171 test TypeScript + 54 test Python (MES) + 37 test Python (vision), tất cả đều xanh |
+| Kiểm thử | 🟢 **Có** | 211 test TypeScript + 116 test Python (MES) + 37 test Python (vision), tất cả đều xanh |
 
 ---
 
@@ -284,6 +285,130 @@ bấm vào `LOT-CAP-2609-B` ra 20 bo mạch / 14 PASS / 6 FAIL.
 
 ---
 
+### 2026-09-04 — Đợt 7: Quản lý cảnh báo theo ISA-18.2 (Ưu tiên 4, hạng mục 1)
+
+Trước đợt này, cảnh báo chỉ là một cờ boolean `acknowledged` cộng một index duy
+nhất trong DB để chống trùng. Đó là một bảng log, không phải một hệ cảnh báo.
+
+**Máy trạng thái bảy trạng thái** (`infra/mes/alarms.py`, thuần, không I/O):
+NORMAL → UNACK_ALM → ACKED_ALM → NORMAL, cộng ba đường rẽ mà bản cũ không có.
+
+- **`RTN_UNACK` là trạng thái đáng giá nhất.** Sự cố tự hết trước khi ai kịp
+  nhìn thì vẫn phải có người xác nhận. Bỏ nó đi là để loại sự cố thoáng qua —
+  đúng loại hay lặp lại nhất — biến mất không dấu vết.
+- **Ba trạng thái im lặng tách riêng**, không gộp: SHELVED (người vận hành, tạm
+  thời, có hạn giờ, tự bật lại), SUPPRESSED_BY_DESIGN (logic thiết kế),
+  OUT_OF_SERVICE (bảo trì). Gộp lại là mất khả năng trả lời "ai đã tắt cái này,
+  theo thẩm quyền nào".
+- Cả ba đều đi trong **cùng gói tin WebSocket** với danh sách chính. Tắt một
+  cảnh báo mà không có chỗ nào nhìn lại được thì đúng là đã xoá nó.
+
+**Chống chattering bằng hai cơ chế chữa hai bệnh khác nhau.** Deadband chữa
+"dao động quanh đúng setpoint"; on/off-delay chữa "nhảy vọt rồi về ngay". Một
+xung rung 0.2 giây vọt gấp đôi ngưỡng thì deadband bao nhiêu cũng không chặn
+nổi. Deadband **chỉ nới rộng phía tắt** — bật tại `setpoint + deadband` là làm
+chậm đúng cái ngưỡng kỹ sư vừa chọn. Bộ đếm on-delay tính lại từ đầu mỗi lần
+điều kiện đổi chiều.
+
+**Cảnh báo an toàn không được có on-delay**, chặn ở cả hai tầng:
+`AlarmDefinition.__post_init__` ném lỗi khi dựng, và bảng có
+`CONSTRAINT alarm_safety_khong_duoc_tre`. Lặp lại là cố ý — bảng là chỗ kỹ sư
+quy trình sửa bằng SQL, không phải chỉ qua mã nguồn.
+
+**Ba bảng, ba tuổi thọ** (`infra/db/init/05-alarms.sql`, thay hẳn `alarm_event`):
+
+| Bảng               | Trả lời                                     | Sống cùng           |
+| ------------------ | ------------------------------------------- | ------------------- |
+| `alarm_definition` | Vì sao tồn tại, người vận hành làm gì?      | hồ sơ thiết bị      |
+| `alarm_transition` | Đi qua trạng thái nào, lúc nào, do ai?      | hồ sơ kiểm toán     |
+| `alarm_state`      | Bây giờ ở đâu, sống sót qua restart chưa?   | phiên chạy hiện tại |
+
+- `alarm_transition.tag` **cố ý không có khoá ngoại**: hồ sơ kiểm toán phải sống
+  sót khi một cảnh báo bị gỡ khỏi cấu hình.
+- `priority` / `alarm_class` / `message` được **chép** vào từng dòng nhật ký chứ
+  không join sang cấu hình. Hạ một cảnh báo từ HIGH xuống LOW mà join thì mọi
+  biểu đồ xu hướng tự viết lại quá khứ.
+- Bảng thường, **không có chính sách xoá**: telemetry thô là dãy số lặp lại,
+  nhật ký cảnh báo là hồ sơ vận hành.
+- Đổi tên hai cột trước khi commit: `at` → `occurred_at`, `condition` →
+  `raw_condition`. Cả hai là từ khoá trong SQL chuẩn / PL/pgSQL; PostgreSQL vẫn
+  cho dùng, nhưng một cái tên phải tra keyword-list mới biết có hợp lệ hay không
+  là một cái tên tồi.
+
+**Rationalization là các CỘT, không phải chú thích.** `consequence`,
+`operator_response`, `response_time_sec` nằm trong `alarm_definition`; mức ưu
+tiên được suy ra từ chúng. Chính quy tắc "không điền nổi `operator_response` thì
+đây không phải cảnh báo" đã **loại bỏ cảnh báo `Line Speed Overclocked`**:
+người vận hành vừa tự tay kéo thanh trượt lên 2.5x, báo lại cho họ điều họ vừa
+làm là một sự kiện, không phải cảnh báo. Thay vào đó đẩy dây nhanh làm máy nóng
+lên (theo **dư địa nhiệt của chính máy**, `SPEED_HEAT_GAIN`) và ăn thêm điện —
+hậu quả đo được, và chính nó kích cảnh báo. `power_usage` trước đây đọc từ DB
+rồi không bao giờ đổi, tức là một số đo chết; giờ nó bám theo tải.
+
+**Cảnh báo không phải interlock.** Trạng thái máy do điều kiện quá trình quyết
+định; `AlarmEngine` chỉ quan sát. Nếu để trạng thái máy bám theo trạng thái cảnh
+báo thì off-delay 30 giây (đặt để chống nhấp nháy) biến thành 30 giây máy không
+chịu chạy lại sau khi đã sửa xong. Hệ quả: **`repair()` không xác nhận hộ cảnh
+báo** — sửa máy là hành động vật lý, xác nhận là hành động của người vận hành.
+Và nút `reset` không còn `alarms.clear()`: nó đưa điều kiện về bình thường rồi
+xác nhận, tức là mọi bước đều đi qua máy trạng thái và để lại dấu trong nhật ký.
+
+**Chỉ số hiệu năng** (`infra/mes/alarm_metrics.py`, ISA-18.2 điều 16 / EEMUA
+191): tỉ lệ trung bình và đỉnh trên mỗi 10 phút, % khoảng bị alarm flood,
+top-10 bad actor, chattering, stale, phân bố ưu tiên, thời gian tới lúc xác
+nhận, và số lần shelve không ghi lý do (unauthorized suppression).
+
+- **Mẫu số là toàn bộ cửa sổ**, kể cả những khoảng 10 phút không có cảnh báo
+  nào. Bỏ khoảng rỗng đi là cách dễ nhất để một hệ thống đang ngồi trên một trận
+  cảnh báo vẫn báo cáo đẹp.
+- **Chattering dùng cửa sổ TRƯỢT 60 giây** (`RANGE BETWEEN INTERVAL '60 seconds'
+  PRECEDING`), không cắt khúc theo phút: ba lần kêu lúc 10:00:59 / 10:01:00 /
+  10:01:01 là chattering thật, cắt khúc theo phút sẽ thấy "1 rồi 2" và không báo.
+- Bảng KPI nói thật kể cả khi chính hệ thống này trượt chỉ tiêu.
+
+**Frontend.**
+
+- `src/features/factory/lib/isa18.ts` — bản cài đặt **thứ hai** của cùng máy
+  trạng thái, dùng khi chưa cấu hình `VITE_MES_API_URL`. `isa18.test.ts` là bản
+  dịch từng ca của `test_alarms.py`. Cùng kỷ luật với `oee.ts` ↔ `oee.py` và
+  `ladder.ts` ↔ `conveyor.st`: nếu bản trong trình duyệt chạy cơ chế khác thì màn
+  hình lúc demo không phải màn hình hệ thống thật tạo ra.
+- Route thứ sáu `/alarms` — `AlarmCenter`: alarm summary, danh sách bị tắt tiếng,
+  nhật ký chuyển trạng thái, bảng chỉ số hiệu năng, và Master Alarm Database.
+  Bảng cấu hình đọc từ `/api/alarms/definitions` khi có backend, từ engine trong
+  trình duyệt khi chạy ngoại tuyến — không vẽ bản suy ra trong khi hệ thống đang
+  chạy theo cấu hình của DB.
+- Xác nhận theo **`tag`** chứ không theo một id ngẫu nhiên mỗi lần kêu — cùng lý
+  do mã tài sản đã thay khoá `m1`.
+- `sensorSimulator` export cả lớp (như `MesLink`): từ khi cảnh báo có máy trạng
+  thái, một cảnh báo ACKED_ALM đang trong off-delay sẽ sống qua ranh giới giữa
+  hai test.
+- Tiếng bíp khoá theo `tag@raisedAt` chứ không theo id: cùng một cảnh báo kêu
+  lại sau khi đã trở về bình thường là một sự cố MỚI và phải bíp lần nữa.
+
+**Kiểm thử**: 116 test Python (thêm `test_alarms.py` 41 ca + `test_alarm_metrics.py`
+17 ca) và 211 test TypeScript (thêm `isa18.test.ts` 37 ca). Máy trạng thái đi
+qua thời gian bằng tham số `now` chứ không bằng `sleep`, nên on-delay 10 giây
+được kiểm tra trong 0 giây.
+
+**Đã kiểm chứng**: chạy dashboard ở chế độ mô phỏng và đi hết vòng đời trên
+trình duyệt — E-Stop kêu ngay (URGENT, không on-delay); quá nhiệt chờ hết
+on-delay mới kêu (HIGH, `90 °C / SP 88`); bấm "Sửa Máy" thì máy chạy lại nhưng
+cảnh báo chuyển sang RTN_UNACK và **vẫn nằm trên màn hình**; shelve thì nó rời
+màn hình chính sang danh sách "Đang bị tắt tiếng" kèm lý do và mốc tự bật lại;
+trong lúc đó `TEMP.HI` (ngưỡng thấp hơn) kêu lên đúng như thiết kế phân tầng
+HI/HIHI.
+
+**Chưa kiểm chứng**: schema SQL và các truy vấn KPI mới **chưa chạy trên
+TimescaleDB thật** — Docker Desktop không lên trong phiên làm việc này. Đã kiểm
+cú pháp toàn bộ bằng `pglast` (bọc chính parser của PostgreSQL): 5 file init +
+19 truy vấn trong Python đều parse sạch. Còn thiếu phần ngữ nghĩa (tên cột khi
+join, kiểu tham số asyncpg) — việc đầu tiên của phiên sau là
+`docker compose -f infra/docker-compose.yml down -v && up -d` rồi đối chiếu
+`/api/alarms/performance`.
+
+---
+
 ## 4. Quyết định đã chốt (đừng lật lại nếu không có lý do mới)
 
 - **Lệnh HMI ghi vào `%QX1.x`, không phải `%IX`.** Modbus master chỉ được ghi
@@ -343,6 +468,51 @@ bấm vào `LOT-CAP-2609-B` ra 20 bo mạch / 14 PASS / 6 FAIL.
   module chạy lại (registry là của trình duyệt), nên hằng số ở tầng module thì
   không cách nào test được nhánh "chưa cấu hình".
 
+- **Cảnh báo không phải interlock.** Trạng thái máy do điều kiện quá trình quyết
+  định, `AlarmEngine` chỉ quan sát. Để trạng thái máy bám theo trạng thái cảnh
+  báo thì một off-delay đặt để chống nhấp nháy sẽ biến thành thời gian máy không
+  chịu chạy lại sau khi đã sửa xong.
+- **`repair()` không xác nhận hộ cảnh báo, và `reset` không xoá trắng.** Sửa máy
+  là hành động vật lý; xác nhận là hành động của người vận hành. Gộp lại thì
+  RTN_UNACK không còn lý do tồn tại, và nút reset trở thành nút làm biến mất mọi
+  bằng chứng.
+- **Deadband chỉ nới rộng phía TẮT.** Bật tại `setpoint + deadband` là làm chậm
+  đúng cái ngưỡng kỹ sư vừa chọn: người ta chọn 75 độ vì 75 là ngưỡng, không
+  phải 78.
+- **Deadband và độ trễ chữa hai bệnh khác nhau**, không thay thế nhau. Deadband
+  chữa dao động quanh setpoint; on/off-delay chữa xung nhọn.
+- **Cảnh báo `SAFETY` không được có on-delay**, chặn ở cả kiểu dữ liệu Python
+  lẫn `CONSTRAINT` của bảng. Lặp lại là cố ý: bảng là chỗ sửa bằng SQL.
+- **Ba trạng thái im lặng (shelve / suppress / out-of-service) không gộp làm
+  một**, và cả ba phải hiện ở một danh sách nhìn thấy được. Tắt một cảnh báo mà
+  không có chỗ nào nhìn lại được thì đúng là đã xoá nó.
+- **Shelve bắt buộc có hạn và tự hết hạn**, hạn bị kẹp bởi `max_shelve_sec` của
+  chính cảnh báo (cảnh báo an toàn tối đa 5 phút). Bật lại mà điều kiện còn xấu
+  thì nó kêu LẠI và lại là chưa xác nhận.
+- **Nhật ký cảnh báo chép `priority`/`message` vào từng dòng, không join.** Hạ
+  một cảnh báo từ HIGH xuống LOW mà join thì mọi biểu đồ xu hướng tự viết lại
+  quá khứ.
+- **`alarm_transition.tag` cố ý không có khoá ngoại.** Hồ sơ kiểm toán phải sống
+  sót khi một cảnh báo bị gỡ khỏi cấu hình.
+- **Nhật ký cảnh báo không có chính sách xoá.** Telemetry thô là dãy số lặp lại
+  nên sống 30 ngày; nhật ký cảnh báo là hồ sơ vận hành.
+- **Mẫu số của tỉ lệ cảnh báo là toàn bộ cửa sổ**, kể cả khoảng không có cảnh
+  báo nào. Bỏ khoảng rỗng là cách dễ nhất để báo cáo đẹp trong khi đang ngồi
+  trên một trận cảnh báo.
+- **Chattering đếm bằng cửa sổ trượt 60 giây**, không cắt khúc theo phút.
+- **Cảnh báo nào không điền nổi "người vận hành phải làm gì" thì không phải cảnh
+  báo.** Đó là lý do `Line Speed Overclocked` bị loại: nó báo lại cho người vận
+  hành điều họ vừa tự tay làm.
+- **Xác nhận theo `tag`, không theo id ngẫu nhiên mỗi lần kêu.** `tag` là danh
+  tính bền trong Master Alarm Database, dùng chung từ cấu hình qua nhật ký tới
+  màn hình — cùng lý do mã tài sản đã thay khoá `m1`.
+- **Trạng thái cảnh báo phải sống sót qua khởi động lại backend.** Một cảnh báo
+  chưa ai xác nhận mà biến mất sau lần deploy kế tiếp là một cảnh báo bị nuốt;
+  nghiêm trọng hơn là hạn shelve, vì mất nó thì cảnh báo đang tắt có chủ đích sẽ
+  kêu lại giữa ca mà không ai hiểu vì sao.
+- **Không đặt tên cột trùng từ khoá SQL** (`at`, `condition` → `occurred_at`,
+  `raw_condition`). PostgreSQL vẫn cho dùng, nhưng một cái tên phải tra
+  keyword-list mới biết có hợp lệ hay không là một cái tên tồi.
 ---
 
 ## 5. Việc tiếp theo (theo thứ tự ưu tiên)
@@ -378,8 +548,19 @@ Còn nợ nếu muốn đi sâu tiếp:
       mẫu dựng sẵn.
 
 ### Ưu tiên 4 — Phần "kỹ sư", chọn 1–2 cái làm sâu
-- [ ] **Alarm theo ISA-18.2**: state machine chuẩn (Normal → Unack → Ack →
-      RTN), shelving, chống chattering. Hiện tại alarm mới chỉ có cờ boolean.
+
+- [x] **Alarm theo ISA-18.2** — xong 2026-09-04 (đợt 7). Còn nợ nếu muốn đi sâu:
+      - [ ] **Chạy thử trên TimescaleDB thật.** Schema và các truy vấn KPI mới
+            mới chỉ kiểm được cú pháp bằng `pglast`, chưa chạy trên DB thật.
+            Đây là việc đầu tiên của phiên sau.
+      - [ ] Alarm flood suppression: khi trên 10 cảnh báo ập đến trong 10 phút,
+            gom theo nguyên nhân gốc thay vì đổ hết lên màn hình.
+      - [ ] First-out / cause-and-effect: cảnh báo nào kêu TRƯỚC trong một chuỗi
+            đổ dây chuyền — đó là câu hỏi thật sự khi truy nguyên nhân.
+      - [ ] Cảnh báo từ AOI và từ PLC vào chung một máy trạng thái (hiện chỉ có
+            4 máy trong bảng `asset`).
+      - [ ] Đẩy cảnh báo lên MQTT theo Unified Namespace để Node-RED / Grafana
+            đọc cùng một nguồn.
 - [ ] **Predictive maintenance**: FFT tín hiệu rung, tính tần số đặc trưng hỏng
       vòng bi (BPFO/BPFI). Đây là chỗ nền tự động hoá ăn đứt dân thuần web.
 - [ ] **SPC**: biểu đồ kiểm soát X-bar/R + Cpk cho độ dày kem hàn (số liệu

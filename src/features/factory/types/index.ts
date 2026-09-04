@@ -1,3 +1,5 @@
+import type { ActiveAlarm, AlarmCounts } from '../lib/isa18'
+
 export type MachineStatus = 'running' | 'idle' | 'warning' | 'error'
 
 export type FeedDensity = 'LOW' | 'NORMAL' | 'HIGH'
@@ -31,6 +33,11 @@ export interface Machine {
   runTimeMs: number
   /** Accumulated stopped time inside planned production time (ms). */
   downTimeMs: number
+  /**
+   * Emergency-stop button held. A PROCESS variable, not an alarm: the E-Stop
+   * alarm is the thing that reads this flag, never the thing that sets it.
+   */
+  estop?: boolean
   lastUpdated: number // epoch ms
 }
 
@@ -47,17 +54,20 @@ export interface OeeMetrics {
   overall: number // % — availability x performance x quality
 }
 
-export interface AlarmEvent {
-  id: string
-  machineId: string
-  machineName: string
-  timestamp: number // epoch ms
-  severity: 'warning' | 'critical'
-  message: string
-  acknowledged: boolean
-  value: number
-  unit: string
-}
+/**
+ * The alarm types live in `../lib/isa18` next to the state machine that
+ * produces them, and are re-exported here so components keep importing every
+ * shop-floor type from one place.
+ */
+export type {
+  ActiveAlarm,
+  AlarmClass,
+  AlarmCounts,
+  AlarmDefinition,
+  AlarmPriority,
+  AlarmState,
+  AlarmTransition,
+} from '../lib/isa18'
 
 /**
  * Everything a UI component can read about the line, whatever produced it —
@@ -67,7 +77,15 @@ export interface AlarmEvent {
 export interface FactoryState {
   machines: Machine[]
   telemetryHistory: Record<string, TelemetryPoint[]>
-  alarms: AlarmEvent[]
+  /** What the operator sees: UNACK_ALM / ACKED_ALM / RTN_UNACK. */
+  alarms: ActiveAlarm[]
+  /**
+   * Shelved, suppressed and out-of-service alarms, carried in the SAME payload
+   * rather than behind a separate endpoint. Silencing an alarm with nowhere to
+   * see it again is deleting it.
+   */
+  inhibitedAlarms: ActiveAlarm[]
+  alarmCounts: AlarmCounts
   oee: OeeMetrics
   lineSpeed: number
   feedDensity: FeedDensity

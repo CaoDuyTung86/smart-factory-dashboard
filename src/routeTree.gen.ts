@@ -23,6 +23,7 @@ import { Route as errors503RouteImport } from './routes/(errors)/503'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
 import { Route as AuthenticatedFactoryRouteImport } from './routes/_authenticated/_factory'
 import { Route as AuthenticatedSettingsRouteRouteImport } from './routes/_authenticated/settings/route'
+import { Route as AuthenticatedFactoryAlarmsRouteImport } from './routes/_authenticated/_factory/alarms'
 import { Route as AuthenticatedFactoryMesRouteImport } from './routes/_authenticated/_factory/mes'
 import { Route as AuthenticatedFactoryPlcRouteImport } from './routes/_authenticated/_factory/plc'
 import { Route as AuthenticatedFactoryScadaRouteImport } from './routes/_authenticated/_factory/scada'
@@ -104,6 +105,12 @@ const AuthenticatedSettingsRouteRoute =
     path: '/settings',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
+const AuthenticatedFactoryAlarmsRoute =
+  AuthenticatedFactoryAlarmsRouteImport.update({
+    id: '/alarms',
+    path: '/alarms',
+    getParentRoute: () => AuthenticatedFactoryRoute,
+  } as any)
 const AuthenticatedFactoryMesRoute = AuthenticatedFactoryMesRouteImport.update({
   id: '/mes',
   path: '/mes',
@@ -182,6 +189,7 @@ export interface FileRoutesByFullPath {
   '/404': typeof errors404Route
   '/500': typeof errors500Route
   '/503': typeof errors503Route
+  '/alarms': typeof AuthenticatedFactoryAlarmsRoute
   '/mes': typeof AuthenticatedFactoryMesRoute
   '/plc': typeof AuthenticatedFactoryPlcRoute
   '/scada': typeof AuthenticatedFactoryScadaRoute
@@ -206,6 +214,7 @@ export interface FileRoutesByTo {
   '/500': typeof errors500Route
   '/503': typeof errors503Route
   '/': typeof AuthenticatedIndexRoute
+  '/alarms': typeof AuthenticatedFactoryAlarmsRoute
   '/mes': typeof AuthenticatedFactoryMesRoute
   '/plc': typeof AuthenticatedFactoryPlcRoute
   '/scada': typeof AuthenticatedFactoryScadaRoute
@@ -234,6 +243,7 @@ export interface FileRoutesById {
   '/(errors)/503': typeof errors503Route
   '/_authenticated/_factory': typeof AuthenticatedFactoryRouteWithChildren
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/_factory/alarms': typeof AuthenticatedFactoryAlarmsRoute
   '/_authenticated/_factory/mes': typeof AuthenticatedFactoryMesRoute
   '/_authenticated/_factory/plc': typeof AuthenticatedFactoryPlcRoute
   '/_authenticated/_factory/scada': typeof AuthenticatedFactoryScadaRoute
@@ -261,6 +271,7 @@ export interface FileRouteTypes {
     | '/404'
     | '/500'
     | '/503'
+    | '/alarms'
     | '/mes'
     | '/plc'
     | '/scada'
@@ -285,6 +296,7 @@ export interface FileRouteTypes {
     | '/500'
     | '/503'
     | '/'
+    | '/alarms'
     | '/mes'
     | '/plc'
     | '/scada'
@@ -312,6 +324,7 @@ export interface FileRouteTypes {
     | '/(errors)/503'
     | '/_authenticated/_factory'
     | '/_authenticated/'
+    | '/_authenticated/_factory/alarms'
     | '/_authenticated/_factory/mes'
     | '/_authenticated/_factory/plc'
     | '/_authenticated/_factory/scada'
@@ -439,6 +452,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedSettingsRouteRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/_factory/alarms': {
+      id: '/_authenticated/_factory/alarms'
+      path: '/alarms'
+      fullPath: '/alarms'
+      preLoaderRoute: typeof AuthenticatedFactoryAlarmsRouteImport
+      parentRoute: typeof AuthenticatedFactoryRoute
+    }
     '/_authenticated/_factory/mes': {
       id: '/_authenticated/_factory/mes'
       path: '/mes'
@@ -543,6 +563,7 @@ const AuthenticatedSettingsRouteRouteWithChildren =
   )
 
 interface AuthenticatedFactoryRouteChildren {
+  AuthenticatedFactoryAlarmsRoute: typeof AuthenticatedFactoryAlarmsRoute
   AuthenticatedFactoryMesRoute: typeof AuthenticatedFactoryMesRoute
   AuthenticatedFactoryPlcRoute: typeof AuthenticatedFactoryPlcRoute
   AuthenticatedFactoryScadaRoute: typeof AuthenticatedFactoryScadaRoute
@@ -551,6 +572,7 @@ interface AuthenticatedFactoryRouteChildren {
 }
 
 const AuthenticatedFactoryRouteChildren: AuthenticatedFactoryRouteChildren = {
+  AuthenticatedFactoryAlarmsRoute: AuthenticatedFactoryAlarmsRoute,
   AuthenticatedFactoryMesRoute: AuthenticatedFactoryMesRoute,
   AuthenticatedFactoryPlcRoute: AuthenticatedFactoryPlcRoute,
   AuthenticatedFactoryScadaRoute: AuthenticatedFactoryScadaRoute,

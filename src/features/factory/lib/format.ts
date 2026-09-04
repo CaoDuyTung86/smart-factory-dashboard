@@ -22,3 +22,17 @@ export function formatDuration(ms: number): string {
   const minutes = totalMinutes % 60
   return hours > 0 ? hours + 'h ' + minutes + 'm' : minutes + 'm'
 }
+
+/**
+ * Giây thành chuỗi đọc được cho cấu hình cảnh báo ("10 giây", "30 phút").
+ *
+ * Riêng biệt với `formatDuration`: cái kia đo thời gian đã trôi qua của một ca
+ * (đơn vị nhỏ nhất là phút), cái này in ra một THAM SỐ cấu hình mà 10 giây và
+ * 10 phút là hai thứ khác hẳn nhau.
+ */
+export function formatSeconds(seconds: number): string {
+  if (!seconds) return '—'
+  if (seconds < 60) return seconds + ' giây'
+  if (seconds < 3600) return Math.round(seconds / 60) + ' phút'
+  return Math.round((seconds / 3600) * 10) / 10 + ' giờ'
+}

@@ -89,33 +89,3 @@ JOIN (VALUES
   ('CNC-MILL-03',     4800, 15),
   ('AOI-INSPECT-04', 14100,  0)
 ) AS s(asset_code, output, defects) ON s.asset_code = a.asset_code;
-
-
--- ---------------------------------------------------------------------------
--- Nhat ky canh bao
---
--- Luu rieng chu khong nhet vao telemetry: canh bao co vong doi (phat sinh ->
--- xac nhan -> tro ve binh thuong), con telemetry chi la mot day so. Bang nay
--- co san cho vong sau khi lam alarm theo ISA-18.2 — cac cot ack_at/cleared_at
--- chinh la hai chuyen trang thai dau tien cua state machine do.
--- ---------------------------------------------------------------------------
-
-CREATE TABLE alarm_event (
-  id           BIGSERIAL PRIMARY KEY,
-  asset_code   TEXT NOT NULL REFERENCES asset(asset_code) ON DELETE CASCADE,
-  raised_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  severity     TEXT NOT NULL CHECK (severity IN ('warning','critical')),
-  message      TEXT NOT NULL,
-  value        DOUBLE PRECISION,
-  unit         TEXT,
-  acknowledged BOOLEAN NOT NULL DEFAULT FALSE,
-  ack_at       TIMESTAMPTZ,
-  cleared_at   TIMESTAMPTZ
-);
-CREATE INDEX alarm_event_open_idx ON alarm_event (raised_at DESC);
--- Chi duoc phep co mot canh bao chua xac nhan cho moi (may, muc do). Rang buoc
--- nay nam o DB chu khong o code: chong chattering la yeu cau cua he thong
--- canh bao, khong phai cua mot phien ban client cu the.
-CREATE UNIQUE INDEX alarm_event_active_idx
-  ON alarm_event (asset_code, severity)
-  WHERE NOT acknowledged AND cleared_at IS NULL;

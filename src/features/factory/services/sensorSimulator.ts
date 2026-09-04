@@ -1,6 +1,11 @@
+import {
+  AlarmEngine,
+  definitionsForAsset,
+  type ActiveAlarm,
+  type AlarmCounts,
+} from '../lib/isa18'
 import { computeOee, sameOee } from '../lib/oee'
 import type {
-  AlarmEvent,
   FactoryState,
   FeedDensity,
   Machine,
@@ -10,7 +15,7 @@ import type {
 import { alarmChime } from './alarmChime'
 
 /**
- * Ngưỡng cảnh báo nhiệt độ theo từng máy, chép từ bảng `asset` của backend
+ * Thông số danh định và ngưỡng của từng máy, chép từ bảng `asset` của backend
  * (`infra/db/init/04-assets.sql`). Lò reflow chạy 245°C là bình thường, máy gắn
  * linh kiện 245°C là cháy — một ngưỡng dùng chung cho cả dây chuyền thì hoặc
  * báo động giả suốt ngày, hoặc không bao giờ báo.
@@ -18,17 +23,30 @@ import { alarmChime } from './alarmChime'
  * Khi chạy với backend MES thì ngưỡng lấy thẳng từ DB; bản trong trình duyệt
  * này chỉ dùng cho chế độ mô phỏng ngoại tuyến.
  */
-const WARN_TEMP_C: Record<string, number> = {
-  'SMT-LINE-01': 75,
-  'REFLOW-OVEN-02': 262,
-  'CNC-MILL-03': 85,
-  'AOI-INSPECT-04': 55,
+interface AssetLimits {
+  warnTemp: number
+  critTemp: number
+  warnVibration: number
+}
+
+const ASSET_LIMITS: Record<string, AssetLimits> = {
+  'SMT-LINE-01': { warnTemp: 75, critTemp: 88, warnVibration: 4.0 },
+  'REFLOW-OVEN-02': { warnTemp: 262, critTemp: 295, warnVibration: 3.0 },
+  'CNC-MILL-03': { warnTemp: 85, critTemp: 95, warnVibration: 6.0 },
+  'AOI-INSPECT-04': { warnTemp: 55, critTemp: 70, warnVibration: 2.5 },
 }
 
 const TICK_MS = 1500
 /** Points kept per machine — 40 x 1.5s = a 60 second rolling window. */
 const HISTORY_LENGTH = 40
-const MAX_ALARMS = 15
+/** Độ trễ khi trả trạng thái máy về bình thường, tách khỏi deadband cảnh báo. */
+const STATUS_RECOVER_MARGIN_C = 3
+
+/**
+ * Độ nóng lên khi đẩy quá 2.0x, tính theo tỉ lệ dư địa nhiệt của máy mỗi tick.
+ * Cùng hằng số với `SPEED_HEAT_GAIN` trong `infra/mes/line.py`.
+ */
+const SPEED_HEAT_GAIN = 0.2
 
 /**
  * Seeds runTime/downTime consistently with the units already produced, so the
@@ -43,6 +61,7 @@ function seedMachine(
     ...m,
     runTimeMs,
     downTimeMs: runTimeMs * 0.065, // ~93.9% availability at start
+    estop: false,
     lastUpdated: Date.now(),
   }
 }
@@ -108,16 +127,63 @@ const INITIAL_MACHINES: Machine[] = [
   }),
 ]
 
+function limitsOf(id: string): AssetLimits {
+  return (
+    ASSET_LIMITS[id] ?? {
+      warnTemp: Infinity,
+      critTemp: Infinity,
+      warnVibration: Infinity,
+    }
+  )
+}
+
+/**
+ * Master Alarm Database phía trình duyệt, sinh từ chính hồ sơ máy ở trên —
+ * cùng công thức với `05-alarms.sql`. Không gõ lại tay từng con số ở hai nơi.
+ */
+export function buildAlarmEngine(machines: Machine[]): AlarmEngine {
+  const engine = new AlarmEngine()
+  machines.forEach((m) => {
+    const limits = limitsOf(m.id)
+    definitionsForAsset({
+      assetCode: m.id,
+      name: m.name,
+      warnTemp: limits.warnTemp,
+      critTemp: limits.critTemp,
+      warnVibration: limits.warnVibration,
+      nominalPower: m.powerUsage,
+    }).forEach((d) => engine.add(d))
+  })
+  return engine
+}
+
 type Listener = () => void
 
 function densityFactor(density: FeedDensity) {
   return density === 'HIGH' ? 1.4 : density === 'LOW' ? 0.7 : 1.0
 }
 
-class SensorSimulator {
+const EMPTY_COUNTS: AlarmCounts = new AlarmEngine().stateCounts()
+
+/**
+ * Export cả lớp chứ không chỉ instance dùng chung: mỗi test dựng một instance
+ * mới thì trạng thái của test trước không rò sang test sau. Đây là điều bắt
+ * buộc từ khi cảnh báo có máy trạng thái — một cảnh báo ACKED_ALM đang trong
+ * off-delay sẽ sống qua ranh giới giữa hai test. Ứng dụng chỉ dùng
+ * `sensorSimulator` bên dưới. Cùng khuôn mẫu với `MesLink`.
+ */
+export class SensorSimulator {
   private machines: Machine[] = INITIAL_MACHINES.map((m) => ({ ...m }))
   private telemetryHistory: Record<string, TelemetryPoint[]> = {}
-  private alarms: AlarmEvent[] = []
+  /**
+   * Cảnh báo do một máy trạng thái ISA-18.2 sinh ra, không phải một mảng cờ
+   * boolean. Cùng máy trạng thái với `infra/mes/alarms.py`, nên màn hình lúc
+   * chạy ngoại tuyến là đúng màn hình mà hệ thống thật tạo ra.
+   */
+  private engine = buildAlarmEngine(INITIAL_MACHINES)
+  private alarms: ActiveAlarm[] = []
+  private inhibitedAlarms: ActiveAlarm[] = []
+  private alarmCounts: AlarmCounts = EMPTY_COUNTS
   private oee: OeeMetrics = {
     availability: 0,
     performance: 0,
@@ -140,6 +206,7 @@ class SensorSimulator {
       }))
     })
     this.oee = computeOee(this.machines)
+    this.refreshAlarms(now)
     this.rebuildSnapshot()
   }
 
@@ -162,11 +229,16 @@ class SensorSimulator {
 
   public getSnapshot = (): FactoryState => this.snapshot
 
+  /** Master Alarm Database, để màn hình `/alarms` đọc khi chạy ngoại tuyến. */
+  public getAlarmDefinitions = () => this.engine.definitionRows()
+
   private rebuildSnapshot() {
     this.snapshot = {
       machines: this.machines,
       telemetryHistory: this.telemetryHistory,
       alarms: this.alarms,
+      inhibitedAlarms: this.inhibitedAlarms,
+      alarmCounts: this.alarmCounts,
       oee: this.oee,
       lineSpeed: this.lineSpeed,
       feedDensity: this.feedDensity,
@@ -194,6 +266,41 @@ class SensorSimulator {
       this.intervalId = null
     }
     alarmChime.close()
+  }
+
+  // ----------------------------------------------------------------- cảnh báo
+
+  private machineNames(): Map<string, string> {
+    return new Map(this.machines.map((m) => [m.id, m.name]))
+  }
+
+  /**
+   * Đưa số đo hiện tại vào máy trạng thái rồi đọc lại danh sách hiển thị.
+   *
+   * Tên số đo (`temperature`, `vibration`, `power_kw`, `estop`) trùng với tên
+   * metric của historian và của cột `alarm_definition.metric` — một tên duy
+   * nhất đi suốt, không có bảng ánh xạ nào ở giữa.
+   */
+  private refreshAlarms(now: number, chime = false) {
+    const readings = new Map<string, number>()
+    this.machines.forEach((m) => {
+      readings.set(`${m.id}|temperature`, m.temperature)
+      readings.set(`${m.id}|vibration`, m.vibration)
+      readings.set(`${m.id}|power_kw`, m.powerUsage)
+      readings.set(`${m.id}|estop`, m.estop ? 1 : 0)
+    })
+
+    const transitions = this.engine.evaluate(now, readings)
+    // Chỉ bíp khi có cảnh báo thực sự kêu lên, không bíp cho mọi chuyển trạng
+    // thái: xác nhận hay trở về bình thường thì không cần báo động.
+    if (chime && transitions.some((t) => t.toState === 'UNACK_ALM')) {
+      alarmChime.beep()
+    }
+
+    const names = this.machineNames()
+    this.alarms = this.engine.summary(now, names)
+    this.inhibitedAlarms = this.engine.inhibited(now, names)
+    this.alarmCounts = this.engine.stateCounts()
   }
 
   // -------------------------------------------------------------- simulation
@@ -226,21 +333,24 @@ class SensorSimulator {
       }
 
       const initial = INITIAL_MACHINES.find((init) => init.id === m.id) ?? m
+      const limits = limitsOf(m.id)
 
       // Mean reversion keeps temperature/vibration bounded around the baseline.
       const tempDist = initial.temperature - m.temperature
       const vibDist = initial.vibration - m.vibration
-      const speedHeatBonus =
-        this.lineSpeed > 2.0 ? (this.lineSpeed - 2.0) * 8 : 0
-      const speedVibBonus =
-        this.lineSpeed > 2.0 ? (this.lineSpeed - 2.0) * 1.5 : 0
+      const over = Math.max(0, this.lineSpeed - 2.0)
 
+      // Đẩy dây quá 2.0x thì máy nóng lên — đó là HẬU QUẢ ĐO ĐƯỢC của việc đẩy
+      // nhanh, không phải một cảnh báo báo lại cho người vận hành điều họ vừa
+      // tự tay làm. Hệ số tính theo dư địa của chính máy (warn − danh định):
+      // lò reflow còn 17 độ dư địa, máy gắn linh kiện còn 22 độ.
+      const headroom = Math.max(1, limits.warnTemp - initial.temperature)
       const newTemp = Number(
         (
           m.temperature +
           tempDist * 0.15 +
           (Math.random() - 0.5) * 0.6 +
-          speedHeatBonus * 0.2
+          over * headroom * SPEED_HEAT_GAIN
         ).toFixed(1)
       )
       const newVib = Number(
@@ -249,7 +359,21 @@ class SensorSimulator {
           m.vibration +
             vibDist * 0.15 +
             (Math.random() - 0.5) * 0.1 +
-            speedVibBonus * 0.1
+            over * 0.15
+        ).toFixed(2)
+      )
+
+      // Công suất bám theo tải. Trước đây đây là hằng số không bao giờ đổi —
+      // nghĩa là một số đo chết, và một cảnh báo đặt trên nó thì không bao giờ
+      // kêu. Đẩy tốc độ dây lên cao thì động cơ ăn thêm điện, và đó là thứ đo
+      // được — thay cho cảnh báo "Line Speed Overclocked" cũ, vốn chỉ báo lại
+      // cho người vận hành điều họ vừa tự tay làm.
+      const load = 0.72 + 0.28 * this.lineSpeed * density
+      const newPower = Number(
+        (
+          m.powerUsage +
+          (initial.powerUsage * load - m.powerUsage) * 0.2 +
+          (Math.random() - 0.5) * initial.powerUsage * 0.01
         ).toFixed(2)
       )
 
@@ -261,41 +385,24 @@ class SensorSimulator {
       )
 
       // Defect rate per unit climbs sharply once the line is pushed past 2.0x.
-      const defectRate =
-        0.004 + (this.lineSpeed > 2.0 ? (this.lineSpeed - 2.0) * 0.09 : 0)
+      const defectRate = 0.004 + over * 0.09
       let newDefects = m.defects
       for (let i = 0; i < produced; i++) {
         if (Math.random() < defectRate) newDefects++
       }
 
+      // Trạng thái máy do ĐIỀU KIỆN QUÁ TRÌNH quyết định, không do trạng thái
+      // cảnh báo: cảnh báo không phải interlock. Xem ghi chú đầu `infra/mes/
+      // line.py`.
       let status = m.status
-      if (this.lineSpeed > 2.5) {
+      if (m.estop || newTemp > limits.critTemp) {
+        status = 'error'
+      } else if (newTemp > limits.warnTemp || newVib > limits.warnVibration) {
         status = 'warning'
-        this.addAlarm(
-          m,
-          'WARNING: Line Speed Overclocked (' +
-            this.lineSpeed +
-            'x) - Overheating!',
-          'warning',
-          newTemp,
-          '°C'
-        )
-      } else if (newTemp > (WARN_TEMP_C[m.id] ?? Infinity)) {
-        status = 'warning'
-        this.addAlarm(
-          m,
-          'Warning: ' + m.name + ' temperature elevated',
-          'warning',
-          newTemp,
-          '°C'
-        )
       } else if (
         status === 'warning' &&
-        // Trả về bình thường có độ trễ 3°C: trả về ngay tại ngưỡng thì một dao
-        // động nhỏ làm cảnh báo bật/tắt liên tục.
-        newTemp < (WARN_TEMP_C[m.id] ?? Infinity) - 3 &&
-        newVib < 4.0 &&
-        this.lineSpeed <= 2.0
+        newTemp < limits.warnTemp - STATUS_RECOVER_MARGIN_C &&
+        newVib < limits.warnVibration
       ) {
         status = 'running'
       }
@@ -304,6 +411,7 @@ class SensorSimulator {
         ...m,
         temperature: newTemp,
         vibration: newVib,
+        powerUsage: newPower,
         output: m.output + produced,
         defects: newDefects,
         runTimeMs: m.runTimeMs + TICK_MS,
@@ -324,38 +432,17 @@ class SensorSimulator {
     })
     this.telemetryHistory = history
 
+    this.refreshAlarms(now, true)
     this.notify()
   }
 
-  private addAlarm(
-    machine: Machine,
-    message: string,
-    severity: 'warning' | 'critical',
-    value: number,
-    unit: string
-  ) {
-    const alreadyActive = this.alarms.some(
-      (a) =>
-        a.machineId === machine.id && !a.acknowledged && a.severity === severity
-    )
-    if (alreadyActive) return
-
-    alarmChime.beep()
-
-    const newAlarm: AlarmEvent = {
-      id: 'alarm-' + Date.now() + '-' + Math.floor(Math.random() * 1000),
-      machineId: machine.id,
-      machineName: machine.name,
-      timestamp: Date.now(),
-      severity,
-      message,
-      acknowledged: false,
-      value,
-      unit,
-    }
-    this.alarms = [newAlarm, ...this.alarms.slice(0, MAX_ALARMS - 1)]
-  }
-
+  /**
+   * Đặt máy vào một điều kiện hỏng. KHÔNG tự tạo cảnh báo.
+   *
+   * Cảnh báo do máy trạng thái sinh ra khi nó đọc được số đo mới — nhờ vậy
+   * on-delay, deadband và toàn bộ vòng đời đều được đi qua thật sự, chứ không
+   * bị một đường tắt bỏ qua.
+   */
   public triggerFault(
     machineId: string,
     faultType: 'overheat' | 'vibration' | 'emergency_stop'
@@ -363,44 +450,38 @@ class SensorSimulator {
     const now = Date.now()
     this.machines = this.machines.map((m) => {
       if (m.id !== machineId) return m
+      const limits = limitsOf(m.id)
 
       if (faultType === 'overheat') {
-        const val = m.id === 'REFLOW-OVEN-02' ? 295.0 : 88.5
-        this.addAlarm(
-          m,
-          'CRITICAL: Thermal Overheat Detected! (' + val + '°C)',
-          'critical',
-          val,
-          '°C'
-        )
-        return { ...m, temperature: val, status: 'error', lastUpdated: now }
+        // Phải VƯỢT ngưỡng tới hạn chứ không bằng nó: `value > setpoint`.
+        return {
+          ...m,
+          temperature: limits.critTemp + 2,
+          status: 'error',
+          lastUpdated: now,
+        }
       }
-
       if (faultType === 'vibration') {
-        const val = 7.8
-        this.addAlarm(
-          m,
-          'CRITICAL: Mechanical Bearing Fault Vibration (' + val + ' mm/s)',
-          'critical',
-          val,
-          'mm/s'
-        )
-        return { ...m, vibration: val, status: 'error', lastUpdated: now }
+        return {
+          ...m,
+          vibration: Number((limits.warnVibration * 1.3).toFixed(2)),
+          status: 'error',
+          lastUpdated: now,
+        }
       }
-
-      this.addAlarm(
-        m,
-        'CRITICAL: Manual Emergency Stop Triggered',
-        'critical',
-        0,
-        'N/A'
-      )
-      return { ...m, status: 'error', lastUpdated: now }
+      return { ...m, estop: true, status: 'error', lastUpdated: now }
     })
+    this.refreshAlarms(now, true)
     this.notify()
   }
 
-  /** Cool down & repair: back to baseline, related alarms acknowledged. */
+  /**
+   * Sửa máy: đưa điều kiện quá trình về bình thường.
+   *
+   * CỐ Ý không xác nhận cảnh báo hộ. Sửa xong máy không làm biến mất việc đã có
+   * một sự cố xảy ra; cảnh báo chuyển sang RTN_UNACK và vẫn nằm trên màn hình
+   * chờ người bấm xác nhận. Đó là toàn bộ lý do trạng thái RTN_UNACK tồn tại.
+   */
   public repairMachine(machineId: string) {
     const initial = INITIAL_MACHINES.find((m) => m.id === machineId)
     if (!initial) return
@@ -412,32 +493,69 @@ class SensorSimulator {
             ...m,
             temperature: initial.temperature,
             vibration: initial.vibration,
+            powerUsage: initial.powerUsage,
+            estop: false,
             status: 'running',
             lastUpdated: now,
           }
         : m
     )
-    this.alarms = this.alarms.map((a) =>
-      a.machineId === machineId ? { ...a, acknowledged: true } : a
-    )
+    this.refreshAlarms(now)
     this.notify()
   }
 
-  public acknowledgeAlarm(alarmId: string) {
-    this.alarms = this.alarms.map((a) =>
-      a.id === alarmId ? { ...a, acknowledged: true } : a
-    )
+  public acknowledgeAlarm(tag: string) {
+    this.engine.acknowledge(tag, Date.now(), 'hmi')
+    this.refreshAlarms(Date.now())
     this.notify()
   }
 
+  public acknowledgeAsset(machineId: string) {
+    this.engine.acknowledgeAsset(machineId, Date.now(), 'hmi')
+    this.refreshAlarms(Date.now())
+    this.notify()
+  }
+
+  public acknowledgeAll() {
+    this.engine.acknowledgeAll(Date.now(), 'hmi')
+    this.refreshAlarms(Date.now())
+    this.notify()
+  }
+
+  public shelveAlarm(tag: string, seconds: number, reason: string) {
+    this.engine.shelve(tag, Date.now(), seconds, reason, 'hmi')
+    this.refreshAlarms(Date.now())
+    this.notify()
+  }
+
+  public unshelveAlarm(tag: string) {
+    this.engine.unshelve(tag, Date.now(), 'hmi')
+    this.refreshAlarms(Date.now())
+    this.notify()
+  }
+
+  public setAlarmOutOfService(tag: string, out: boolean) {
+    this.engine.setOutOfService(tag, out, Date.now(), 'hmi')
+    this.refreshAlarms(Date.now())
+    this.notify()
+  }
+
+  /**
+   * Đưa dây chuyền về trạng thái sạch.
+   *
+   * KHÔNG xoá trắng cảnh báo. Trước đây `resetAll` gán `alarms = []`, tức là
+   * một nút làm biến mất mọi bằng chứng về những gì vừa xảy ra. Ở đây nó đưa
+   * điều kiện quá trình về bình thường rồi XÁC NHẬN toàn bộ — cũng dẫn tới một
+   * màn hình sạch, nhưng mọi bước đều đi qua máy trạng thái.
+   */
   public resetAll() {
-    this.machines = INITIAL_MACHINES.map((m) => ({
-      ...m,
-      lastUpdated: Date.now(),
-    }))
-    this.alarms = []
+    const now = Date.now()
+    this.machines = INITIAL_MACHINES.map((m) => ({ ...m, lastUpdated: now }))
     this.lineSpeed = 1.0
     this.feedDensity = 'NORMAL'
+    this.refreshAlarms(now)
+    this.engine.acknowledgeAll(now, 'hmi')
+    this.refreshAlarms(now)
     this.notify()
   }
 }

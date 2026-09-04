@@ -18,14 +18,15 @@
 hoá tại nhà máy sản xuất linh kiện điện tử, viết lại bằng góc nhìn kỹ thuật
 phần mềm. Nói rõ ngay để không ai kỳ vọng nhầm:
 
-| Thành phần                          | Trạng thái                                                                                                                                                                   |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `/plc` — **PLC S7-1200 & Ladder**   | **Thật** — chương trình IEC 61131-3 chạy trên OpenPLC, đọc/ghi qua Modbus TCP, khi có hạ tầng ở [`infra/`](infra/). Không có hạ tầng thì tự chuyển sang mô phỏng cùng logic. |
-| `/vision` — **Vision AOI**          | **Thật** — service Python + OpenCV: căn ảnh theo fiducial rồi so ảnh mẫu (template matching + absdiff). Không có service thì quay về dữ liệu mô phỏng.                       |
-| `/mes` — **MES Traceability**       | **Thật** — work order, BOM, routing và genealogy trong PostgreSQL; truy vấn thu hồi theo lô vật tư. Không có backend thì hiện dòng thời gian mẫu, có ghi rõ là dữ liệu mẫu.  |
-| Lưu trữ dữ liệu                     | **Thật** — TimescaleDB: hypertable + 2 continuous aggregate, chính sách nén và xoá theo tuổi. F5 không còn mất dữ liệu.                                                      |
-| `/scada` — **SCADA Command Center** | Số liệu cảm biến vẫn mô phỏng, **nhưng chạy ở server**: một vòng tick duy nhất ghi xuống historian rồi phát cho mọi trình duyệt. OEE đúng công thức Nakajima/SEMI E10.       |
-| `/twin` — **Digital Twin**          | Mô phỏng — chuyển động băng tải, hành trình servo, actuator khí nén.                                                                                                         |
+| Thành phần                          | Trạng thái                                                                                                                                                                       |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/plc` — **PLC S7-1200 & Ladder**   | **Thật** — chương trình IEC 61131-3 chạy trên OpenPLC, đọc/ghi qua Modbus TCP, khi có hạ tầng ở [`infra/`](infra/). Không có hạ tầng thì tự chuyển sang mô phỏng cùng logic.     |
+| `/vision` — **Vision AOI**          | **Thật** — service Python + OpenCV: căn ảnh theo fiducial rồi so ảnh mẫu (template matching + absdiff). Không có service thì quay về dữ liệu mô phỏng.                           |
+| `/mes` — **MES Traceability**       | **Thật** — work order, BOM, routing và genealogy trong PostgreSQL; truy vấn thu hồi theo lô vật tư. Không có backend thì hiện dòng thời gian mẫu, có ghi rõ là dữ liệu mẫu.      |
+| Lưu trữ dữ liệu                     | **Thật** — TimescaleDB: hypertable + 2 continuous aggregate, chính sách nén và xoá theo tuổi. F5 không còn mất dữ liệu.                                                          |
+| `/scada` — **SCADA Command Center** | Số liệu cảm biến vẫn mô phỏng, **nhưng chạy ở server**: một vòng tick duy nhất ghi xuống historian rồi phát cho mọi trình duyệt. OEE đúng công thức Nakajima/SEMI E10.           |
+| `/alarms` — **Alarm Management**    | **Thật** — máy trạng thái ANSI/ISA-18.2 đầy đủ bảy trạng thái, chống chattering bằng deadband + độ trễ, shelving có hạn giờ, nhật ký kiểm toán và chỉ số hiệu năng theo điều 16. |
+| `/twin` — **Digital Twin**          | Mô phỏng — chuyển động băng tải, hành trình servo, actuator khí nén.                                                                                                             |
 
 Nói cho rõ về `/scada`: nhiệt độ và độ rung **không phải số đo từ cảm biến
 thật**. Thứ đã thành thật là đường đi của dữ liệu (server → historian →
@@ -119,12 +120,13 @@ theo tinh thần Sparkplug B.
 ```
 src/features/factory/
 ├── components/       MachineCard, TelemetryChart, OeeGauge, DigitalTwinLine,
-│                     VisionInspector, PlcDiagnostics, MesTraceability, ScadaPanel
+│                     VisionInspector, PlcDiagnostics, MesTraceability, ScadaPanel,
+│                     AlarmCenter + AlarmTable + AlarmPerformancePanel (ISA-18.2)
 ├── hooks/            use-factory-store (chọn nguồn), use-plc-link (PLC thật)
 ├── services/         factorySource (chọn simulator hay MES), sensorSimulator,
 │                     mesLink (WebSocket), mesApi (REST), plcGateway, visionService
-├── lib/              format (thời gian, thời lượng)
-└── types/            Machine, OeeMetrics, AlarmEvent, PcbInspectionRecord, PlcIoState
+├── lib/              oee, ladder, isa18 (máy trạng thái cảnh báo), format, modules
+└── types/            Machine, OeeMetrics, ActiveAlarm, PcbInspectionRecord, PlcIoState
 
 infra/
 ├── docker-compose.yml
@@ -133,8 +135,9 @@ infra/
 ├── gateway/          Modbus → MQTT + WebSocket + REST + ghi historian
 ├── mosquitto/        cấu hình broker
 ├── vision/           service AOI: OpenCV, recipe, ảnh mẫu sinh bằng code
-├── db/init/          schema TimescaleDB (historian) + MES + dữ liệu mẫu
-├── mes/              backend MES: mô hình dây chuyền, OEE, genealogy, REST/WS
+├── db/init/          schema TimescaleDB (historian) + MES + cảnh báo + dữ liệu mẫu
+├── mes/              backend MES: mô hình dây chuyền, OEE, genealogy, cảnh báo
+│                     ISA-18.2 (alarms.py, alarm_metrics.py), REST/WS
 └── load-program.sh   nạp + biên dịch + khởi động PLC
 ```
 
@@ -177,6 +180,46 @@ thật phần lớn cũng không — chi tiết và lý do ở [infra/README.md]
 chúng kiểm thử được bằng ví dụ mẫu — và `ladder.ts` giữ đúng từng dòng với
 `infra/plc/conveyor.st` đang chạy trên PLC thật, để chế độ mô phỏng và chế độ
 LIVE không thể hiểu khác nhau về cùng một mạch.
+
+**Cảnh báo theo ANSI/ISA-18.2, không phải một cờ boolean.** Cảnh báo có vòng
+đời bảy trạng thái, và trạng thái đáng giá nhất là **RTN_UNACK**: sự cố tự hết
+trước khi ai kịp nhìn thì vẫn phải có người xác nhận — bỏ nó đi là để loại sự cố
+thoáng qua (loại hay lặp lại nhất) biến mất không dấu vết. Chống chattering dùng
+**hai** cơ chế chữa **hai** bệnh khác nhau: deadband chỉ nới rộng phía tắt, chữa
+"giá trị dao động quanh đúng setpoint"; on/off-delay chữa "giá trị nhảy vọt rồi
+về ngay" — một xung rung 0.2 giây vọt gấp đôi ngưỡng thì deadband bao nhiêu cũng
+không chặn nổi. Cảnh báo `SAFETY` bị **chặn ngay ở kiểu dữ liệu và ở ràng buộc
+CHECK của DB** nếu ai đó đặt on-delay cho nó.
+
+**Cảnh báo không phải interlock.** Trạng thái máy do điều kiện quá trình quyết
+định; `AlarmEngine` chỉ quan sát cùng những số đo đó rồi báo cho người. Nếu để
+trạng thái máy bám theo trạng thái cảnh báo thì một off-delay 30 giây đặt để
+chống nhấp nháy sẽ biến thành 30 giây máy không chịu chạy lại sau khi đã sửa
+xong. Cũng vì vậy, **sửa máy không tự xác nhận hộ cảnh báo**: sửa máy là hành
+động vật lý, xác nhận là hành động của người vận hành.
+
+**Mỗi cảnh báo phải trả lời được "tôi phải làm gì".** Bảng `alarm_definition`
+lưu hậu quả, hành động của người vận hành và thời gian cho phép phản ứng — đó là
+Master Alarm Database mà ISA-18.2 gọi là kết quả của _alarm rationalization_,
+và mức ưu tiên được **suy ra** từ chúng. Chính quy tắc này đã loại bỏ cảnh báo
+"Line Speed Overclocked" của bản trước: người vận hành vừa tự tay kéo thanh
+trượt lên 2.5x, báo lại cho họ điều họ vừa làm thì không phải cảnh báo. Thay vào
+đó, đẩy dây nhanh làm máy **nóng lên và ăn thêm điện** — hậu quả đo được, và
+chính nó kích cảnh báo.
+
+**Bảng chỉ số hiệu năng nói thật, kể cả khi hệ thống này trượt chỉ tiêu.** Tỉ lệ
+cảnh báo / 10 phút, đỉnh, % khoảng bị alarm flood, top-10 bad actor, chattering,
+stale, phân bố ưu tiên — đối chiếu thẳng với chỉ tiêu công bố của ISA-18.2 điều
+16 / EEMUA 191. Mẫu số là **toàn bộ** thời gian của cửa sổ, kể cả những khoảng
+10 phút không có cảnh báo nào: bỏ khoảng rỗng đi là cách dễ nhất để một hệ thống
+đang ngồi trên một trận cảnh báo vẫn báo cáo đẹp. Một lần shelve không ghi lý do
+bị đếm là _unauthorized suppression_ và tô đỏ.
+
+**Một máy trạng thái, hai bản cài đặt, ghim vào nhau.** `infra/mes/alarms.py` và
+`src/features/factory/lib/isa18.ts` phải cho kết quả giống hệt trên cùng bộ tình
+huống — cùng kỷ luật đã áp cho `oee.py` ↔ `oee.ts` và `ladder.ts` ↔
+`conveyor.st`. Nếu bản trong trình duyệt chạy một cơ chế khác thì màn hình lúc
+demo không phải màn hình hệ thống thật tạo ra.
 
 **Historian ba tầng, không phải một bảng log.** Telemetry thô sống 30 ngày
 (nén sau 7), continuous aggregate 1 phút sống 1 năm, cagg 1 giờ sống 5 năm; API

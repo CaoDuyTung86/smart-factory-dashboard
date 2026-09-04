@@ -16,8 +16,10 @@ const triggerFault = (
 ) => factorySource.triggerFault(machineId, faultType)
 const repairMachine = (machineId: string) =>
   factorySource.repairMachine(machineId)
-const acknowledgeAlarm = (alarmId: string) =>
-  factorySource.acknowledgeAlarm(alarmId)
+const acknowledgeAlarm = (tag: string) => factorySource.acknowledgeAlarm(tag)
+const shelveAlarm = (tag: string, seconds: number, reason: string) =>
+  factorySource.shelveAlarm(tag, seconds, reason)
+const unshelveAlarm = (tag: string) => factorySource.unshelveAlarm(tag)
 const resetAll = () => factorySource.resetAll()
 
 /**
@@ -123,11 +125,15 @@ const MachineGridSection = memo(function MachineGridSection() {
 
 const AlarmSection = memo(function AlarmSection() {
   const alarms = useFactoryStore((s) => s.alarms)
+  const inhibitedAlarms = useFactoryStore((s) => s.inhibitedAlarms)
   return (
     <AlarmTable
       alarms={alarms}
+      inhibitedAlarms={inhibitedAlarms}
       onAcknowledge={acknowledgeAlarm}
       onRepair={repairMachine}
+      onShelve={shelveAlarm}
+      onUnshelve={unshelveAlarm}
     />
   )
 })

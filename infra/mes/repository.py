@@ -8,6 +8,7 @@ mot ORM se sinh ra N+1 query cho dung nhung cho khong duoc phep cham.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -266,35 +267,121 @@ async def save_shift_state(pool, machines) -> None:
         )
 
 
-async def persist_alarm(pool, alarm) -> None:
+# ---------------------------------------------------------------------------
+# Canh bao (ISA-18.2)
+#
+# Ba bang, ba tuoi tho: `alarm_definition` la cau hinh, `alarm_state` la trang
+# thai song phai sot qua restart, `alarm_transition` la ho so kiem toan. Xem
+# `infra/db/init/05-alarms.sql`.
+# ---------------------------------------------------------------------------
+
+
+async def load_alarm_definitions(pool) -> list[dict]:
     async with pool.acquire() as conn:
-        # ON CONFLICT bam vao index duy nhat "mot canh bao chua xac nhan cho
-        # moi (may, muc do)" — chong chattering nam o DB, khong o client.
-        await conn.execute(
-            """
-            INSERT INTO alarm_event (asset_code, raised_at, severity, message, value, unit)
-            VALUES ($1, to_timestamp($2 / 1000.0), $3, $4, $5, $6)
-            ON CONFLICT DO NOTHING
-            """,
-            alarm.machine_id,
-            alarm.timestamp,
-            alarm.severity,
-            alarm.message,
-            float(alarm.value),
-            alarm.unit,
+        return _rows(
+            await conn.fetch(
+                """
+                SELECT tag, asset_code, metric, comparison, setpoint, deadband,
+                       on_delay_sec, off_delay_sec, priority, alarm_class, message,
+                       unit, consequence, operator_response, response_time_sec,
+                       max_shelve_sec, enabled
+                FROM alarm_definition
+                ORDER BY asset_code, tag
+                """
+            )
         )
 
 
-async def acknowledge_alarms(pool, asset_code: str | None = None) -> None:
+async def load_alarm_state(pool) -> list[dict]:
     async with pool.acquire() as conn:
-        if asset_code:
-            await conn.execute(
-                "UPDATE alarm_event SET acknowledged = TRUE, ack_at = now() "
-                "WHERE asset_code = $1 AND NOT acknowledged",
-                asset_code,
+        return _rows(
+            await conn.fetch(
+                "SELECT tag, state, raw_condition, active, raised_at, acked_at, rtn_at, "
+                "       shelved_until, shelve_reason, value "
+                "FROM alarm_state"
             )
-        else:
-            await conn.execute(
-                "UPDATE alarm_event SET acknowledged = TRUE, ack_at = now() "
-                "WHERE NOT acknowledged"
-            )
+        )
+
+
+async def save_alarm_state(pool, engine) -> None:
+    """Ghi lai trang thai cua toan bo canh bao.
+
+    Mot canh bao chua ai xac nhan ma bien mat sau lan deploy ke tiep la mot
+    canh bao bi nuot. Nghiem trong hon la shelving: neu han shelve mat khi khoi
+    dong lai, canh bao dang duoc tat co chu dich se keu lai giua ca ma khong ai
+    hieu vi sao — va do dung la tinh huong lam nguoi van hanh mat long tin vao
+    ca he thong.
+    """
+
+    def ts(value):
+        return None if value is None else datetime.fromtimestamp(value, tz=timezone.utc)
+
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO alarm_state (tag, state, raw_condition, active, raised_at,
+                                     acked_at, rtn_at, shelved_until, shelve_reason,
+                                     value, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+            ON CONFLICT (tag) DO UPDATE SET
+              state = EXCLUDED.state, raw_condition = EXCLUDED.raw_condition,
+              active = EXCLUDED.active, raised_at = EXCLUDED.raised_at,
+              acked_at = EXCLUDED.acked_at, rtn_at = EXCLUDED.rtn_at,
+              shelved_until = EXCLUDED.shelved_until,
+              shelve_reason = EXCLUDED.shelve_reason,
+              value = EXCLUDED.value, updated_at = now()
+            """,
+            [
+                (
+                    rt.tag,
+                    rt.state,
+                    rt.condition,
+                    rt.active,
+                    ts(rt.raised_at),
+                    ts(rt.acked_at),
+                    ts(rt.rtn_at),
+                    ts(rt.shelved_until),
+                    rt.shelve_reason,
+                    float(rt.value),
+                )
+                for rt in engine.runtime.values()
+            ],
+        )
+
+
+async def journal_transitions(pool, transitions) -> None:
+    """Ghi nhat ky chuyen trang thai.
+
+    `executemany` mot lo chu khong mot cau cho moi dong: mot tran canh bao sinh
+    ra hang chuc chuyen trang thai trong cung mot tick, va do dung la luc khong
+    duoc phep cham.
+    """
+    if not transitions:
+        return
+    async with pool.acquire() as conn:
+        await conn.executemany(
+            """
+            INSERT INTO alarm_transition
+              (tag, asset_code, occurred_at, from_state, to_state, cause, priority,
+               alarm_class, message, value, unit, operator, note)
+            VALUES ($1,$2,to_timestamp($3),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            """,
+            [
+                (
+                    t.tag,
+                    t.asset_code,
+                    t.at,
+                    t.from_state,
+                    t.to_state,
+                    t.cause,
+                    t.priority,
+                    t.alarm_class,
+                    t.message,
+                    None if t.value is None else float(t.value),
+                    t.unit,
+                    t.operator,
+                    t.note,
+                )
+                for t in transitions
+            ],
+        )

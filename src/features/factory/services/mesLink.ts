@@ -13,8 +13,8 @@
  * liệu sinh ra tại chỗ là kiểu lỗi tệ nhất một hệ SCADA có thể mắc: người vận
  * hành nhìn thấy dây chuyền vẫn chạy trong khi thực tế không ai biết nó ra sao.
  */
+import { AlarmEngine, type ActiveAlarm, type AlarmCounts } from '../lib/isa18'
 import type {
-  AlarmEvent,
   FactoryState,
   FeedDensity,
   Machine,
@@ -38,6 +38,9 @@ const EMPTY_OEE: OeeMetrics = {
   overall: 0,
 }
 
+/** Bộ đếm trạng thái rỗng, lấy từ chính engine để không gõ lại 7 khoá. */
+const EMPTY_COUNTS: AlarmCounts = new AlarmEngine().stateCounts()
+
 interface LinkMeta {
   status: MesLinkStatus
   /** Đồng hồ của server lúc gói tin được phát — không phải đồng hồ trình duyệt. */
@@ -50,7 +53,9 @@ interface LinkMeta {
 interface WirePayload {
   type?: string
   machines?: Machine[]
-  alarms?: AlarmEvent[]
+  alarms?: ActiveAlarm[]
+  inhibitedAlarms?: ActiveAlarm[]
+  alarmCounts?: AlarmCounts
   oee?: OeeMetrics
   lineSpeed?: number
   feedDensity?: FeedDensity
@@ -69,6 +74,8 @@ export class MesLink {
     machines: [],
     telemetryHistory: {},
     alarms: [],
+    inhibitedAlarms: [],
+    alarmCounts: EMPTY_COUNTS,
     oee: EMPTY_OEE,
     lineSpeed: 1.0,
     feedDensity: 'NORMAL',
@@ -218,18 +225,25 @@ export class MesLink {
     const alarms = payload.alarms ?? []
     const now = payload.serverTime ?? Date.now()
 
-    // Cảnh báo mới thì bíp một tiếng — nhưng chỉ khi đã có ảnh chụp đầu tiên,
-    // nếu không mỗi lần mở tab sẽ bíp cho cả 15 cảnh báo cũ.
+    // Bíp khi có cảnh báo mới KÊU LÊN — nhưng chỉ khi đã có ảnh chụp đầu tiên,
+    // nếu không mỗi lần mở tab sẽ bíp cho cả danh sách cũ.
+    //
+    // Khoá theo `tag` + thời điểm kêu chứ không theo một id ngẫu nhiên: cùng
+    // một cảnh báo kêu lại sau khi đã trở về bình thường là một sự cố MỚI và
+    // phải bíp lần nữa, còn cùng một lần kêu thì dù gói tin phát lại bao nhiêu
+    // lần cũng chỉ bíp một tiếng.
     const seenBefore = this.meta.serverTime > 0
     for (const alarm of alarms) {
-      if (!this.knownAlarmIds.has(alarm.id)) {
-        this.knownAlarmIds.add(alarm.id)
-        if (seenBefore && !alarm.acknowledged) alarmChime.beep()
-      }
+      if (alarm.state !== 'UNACK_ALM') continue
+      const key = `${alarm.tag}@${alarm.raisedAt ?? 0}`
+      if (this.knownAlarmIds.has(key)) continue
+      this.knownAlarmIds.add(key)
+      if (seenBefore) alarmChime.beep()
     }
-    // Không để tập id phình mãi: giữ đúng những cảnh báo còn trên bảng.
     if (this.knownAlarmIds.size > alarms.length * 4 + 32) {
-      this.knownAlarmIds = new Set(alarms.map((a) => a.id))
+      this.knownAlarmIds = new Set(
+        alarms.map((a) => `${a.tag}@${a.raisedAt ?? 0}`)
+      )
     }
 
     const history: Record<string, TelemetryPoint[]> = {}
@@ -252,6 +266,8 @@ export class MesLink {
       machines,
       telemetryHistory: history,
       alarms,
+      inhibitedAlarms: payload.inhibitedAlarms ?? [],
+      alarmCounts: payload.alarmCounts ?? this.state.alarmCounts,
       oee: payload.oee ?? this.state.oee,
       lineSpeed: payload.lineSpeed ?? this.state.lineSpeed,
       feedDensity: payload.feedDensity ?? this.state.feedDensity,
@@ -280,8 +296,16 @@ export class MesLink {
     this.send({ cmd: 'triggerFault', machineId, fault })
   public repairMachine = (machineId: string) =>
     this.send({ cmd: 'repair', machineId })
-  public acknowledgeAlarm = (alarmId: string) =>
-    this.send({ cmd: 'acknowledge', alarmId })
+  public acknowledgeAlarm = (tag: string) =>
+    this.send({ cmd: 'acknowledge', tag })
+  public acknowledgeAsset = (machineId: string) =>
+    this.send({ cmd: 'acknowledgeAsset', machineId })
+  public acknowledgeAll = () => this.send({ cmd: 'acknowledgeAll' })
+  public shelveAlarm = (tag: string, seconds: number, reason: string) =>
+    this.send({ cmd: 'shelve', tag, seconds, reason })
+  public unshelveAlarm = (tag: string) => this.send({ cmd: 'unshelve', tag })
+  public setAlarmOutOfService = (tag: string, value: boolean) =>
+    this.send({ cmd: 'outOfService', tag, value })
   public resetAll = () => this.send({ cmd: 'reset' })
 }
 
