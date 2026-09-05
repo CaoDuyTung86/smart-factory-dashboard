@@ -43,3 +43,8 @@ dist-ssr
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Lockfile: du an nay dung pnpm (xem "packageManager" trong package.json).
+# Chi pnpm-lock.yaml duoc commit; lockfile cua npm/yarn gay lech voi CI.
+package-lock.json
+yarn.lock

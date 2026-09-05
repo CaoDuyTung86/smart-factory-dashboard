@@ -69,7 +69,12 @@ export const PRIORITY_RANK: Record<AlarmPriority, number> = {
 }
 
 export type AlarmClass =
-  'SAFETY' | 'ENVIRONMENTAL' | 'QUALITY' | 'PROCESS' | 'EQUIPMENT' | 'ENERGY'
+  | 'SAFETY'
+  | 'ENVIRONMENTAL'
+  | 'QUALITY'
+  | 'PROCESS'
+  | 'EQUIPMENT'
+  | 'ENERGY'
 
 export type Comparison = 'HI' | 'HIHI' | 'LO' | 'LOLO' | 'BOOL'
 
