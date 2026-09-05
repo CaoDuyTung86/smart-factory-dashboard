@@ -146,7 +146,13 @@ export function AlarmCenter() {
       ])
         .then(([performance, journal, definitions, episodes]) => {
           if (!cancelled) {
-            setData({ performance, journal, definitions, episodes, error: null })
+            setData({
+              performance,
+              journal,
+              definitions,
+              episodes,
+              error: null,
+            })
           }
         })
         .catch((err: unknown) => {

@@ -79,7 +79,11 @@ export function FirstOutPanel({
     // Nói rõ là KHÔNG ĐỌC ĐƯỢC, chứ không để một khung rỗng cho người xem tự
     // hiểu thành "không có chuỗi cảnh báo nào".
     return (
-      <Khung mo_ta={<span className='text-destructive'>Không đọc được — {error}</span>}>
+      <Khung
+        mo_ta={
+          <span className='text-destructive'>Không đọc được — {error}</span>
+        }
+      >
         <span />
       </Khung>
     )
@@ -95,8 +99,8 @@ export function FirstOutPanel({
 
   const mo_ta = (
     <>
-      Xếp theo thời điểm <strong>khởi phát</strong> (lúc kêu trừ độ trễ bật), chứ
-      không theo thời điểm kêu. Cách nhau dưới{' '}
+      Xếp theo thời điểm <strong>khởi phát</strong> (lúc kêu trừ độ trễ bật),
+      chứ không theo thời điểm kêu. Cách nhau dưới{' '}
       <strong>{data.resolutionSec}s</strong> thì hệ thống không phân định được
       thứ tự và sẽ nói thẳng ra. Ma trận cause-and-effect hiện có{' '}
       <strong>{data.linkCount}</strong> quan hệ khai báo.
@@ -107,7 +111,7 @@ export function FirstOutPanel({
     return (
       <Khung mo_ta={mo_ta}>
         <CardContent>
-          <p className='text-muted-foreground text-sm'>
+          <p className='text-sm text-muted-foreground'>
             Không có chuỗi nào trong {data.windowHours} giờ qua. Một cảnh báo lẻ
             loi không tính là chuỗi — nó tự là first-out của chính nó.
           </p>
@@ -131,18 +135,18 @@ function ChuoiCanhBao({ ep }: { ep: AlarmEpisode }) {
   const dao_thu_tu = ep.reorderedByDelay.length > 0
 
   return (
-    <div className='border-border/60 rounded-lg border p-3'>
+    <div className='rounded-lg border border-border/60 p-3'>
       <div className='mb-3 flex flex-wrap items-center gap-2'>
         <Badge variant='outline' className='font-mono text-xs'>
           {gio.format(ep.startedAt)} → {gio.format(ep.endedAt)}
         </Badge>
-        <span className='text-muted-foreground text-xs'>
+        <span className='text-xs text-muted-foreground'>
           {ep.count} cảnh báo · {ep.assets.length} máy
         </span>
       </div>
 
       {/* First-out. Đây là dòng người ta mở màn hình này ra để đọc. */}
-      <div className='bg-muted/40 mb-3 rounded-md p-3'>
+      <div className='mb-3 rounded-md bg-muted/40 p-3'>
         <div className='mb-1 flex items-center gap-2'>
           <Zap className='h-4 w-4 text-amber-500' />
           <span className='text-xs font-semibold tracking-wide uppercase'>
@@ -166,7 +170,7 @@ function ChuoiCanhBao({ ep }: { ep: AlarmEpisode }) {
           )}
         </div>
         <p className='font-mono text-sm font-semibold'>{ep.firstOut.tag}</p>
-        <p className='text-muted-foreground text-xs'>{ep.firstOut.message}</p>
+        <p className='text-xs text-muted-foreground'>{ep.firstOut.message}</p>
 
         {/* Đồng hồ bó tay nhưng quan hệ nhân quả đã khai báo vẫn gỡ được thế
             bế tắc — nói rõ căn cứ, vì "chắc vì đo được" và "chắc vì biết cơ
@@ -181,17 +185,17 @@ function ChuoiCanhBao({ ep }: { ep: AlarmEpisode }) {
 
         {!ep.confident && (
           <p className='mt-2 text-xs text-amber-600 dark:text-amber-500'>
-            Cách cảnh báo kế tiếp {ep.separationSec ?? 0}s, nhỏ hơn giới hạn phân
-            giải {ep.resolutionSec}s của hệ.
+            Cách cảnh báo kế tiếp {ep.separationSec ?? 0}s, nhỏ hơn giới hạn
+            phân giải {ep.resolutionSec}s của hệ.
             {ep.firstOut.tiedWith.length > 0 && (
               <>
                 {' '}
                 Đồng hạng với{' '}
                 <span className='font-mono'>
                   {ep.firstOut.tiedWith.join(', ')}
-                </span>
-                {' '}— chọn ra một cái là do thứ tự chữ cái, không phải kết luận
-                kỹ thuật.
+                </span>{' '}
+                — chọn ra một cái là do thứ tự chữ cái, không phải kết luận kỹ
+                thuật.
               </>
             )}
           </p>
@@ -213,19 +217,23 @@ function ChuoiCanhBao({ ep }: { ep: AlarmEpisode }) {
           <HelpCircle className='mt-0.5 h-3.5 w-3.5 shrink-0' />
           <span>
             {ep.unexplained} cảnh báo không có quan hệ nhân quả nào giải thích
-            được, trải trên {ep.assets.length} máy. Đây nhiều khả năng không phải
-            một chuỗi lan truyền mà là một <strong>nguyên nhân chung</strong>{' '}
-            (tốc độ dây chuyền, mật độ cấp liệu, nguồn điện, môi trường) — truy
-            theo kiểu chuỗi sẽ dẫn đi sai hướng. Hệ thống không đoán nguyên nhân,
-            nó chỉ nói đây không phải một chuỗi.
+            được, trải trên {ep.assets.length} máy. Đây nhiều khả năng không
+            phải một chuỗi lan truyền mà là một{' '}
+            <strong>nguyên nhân chung</strong> (tốc độ dây chuyền, mật độ cấp
+            liệu, nguồn điện, môi trường) — truy theo kiểu chuỗi sẽ dẫn đi sai
+            hướng. Hệ thống không đoán nguyên nhân, nó chỉ nói đây không phải
+            một chuỗi.
           </span>
         </p>
       )}
 
       <ol className='space-y-1.5'>
         {ep.members.map((m) => (
-          <li key={m.tag} className='flex flex-wrap items-baseline gap-x-2 text-xs'>
-            <span className='text-muted-foreground w-10 shrink-0 text-right font-mono'>
+          <li
+            key={m.tag}
+            className='flex flex-wrap items-baseline gap-x-2 text-xs'
+          >
+            <span className='w-10 shrink-0 text-right font-mono text-muted-foreground'>
               +{m.offsetSec}s
             </span>
             <Badge
@@ -240,7 +248,8 @@ function ChuoiCanhBao({ ep }: { ep: AlarmEpisode }) {
             {/* Hai mốc thời gian luôn đi cùng nhau: giấu thời điểm kêu đi thì
                 không ai đối chiếu được màn hình này với nhật ký. */}
             <span className='text-muted-foreground'>
-              khởi phát {gio.format(m.onsetAt)} · kêu {gio.format(m.annunciatedAt)}
+              khởi phát {gio.format(m.onsetAt)} · kêu{' '}
+              {gio.format(m.annunciatedAt)}
               {m.onDelaySec > 0 && ` (trễ ${m.onDelaySec}s)`}
             </span>
             {m.explainedBy && (
