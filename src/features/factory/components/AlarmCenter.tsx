@@ -23,6 +23,7 @@ import {
   isMesEnabled,
   mesApi,
   type AlarmDefinitionRow,
+  type AlarmEpisodes,
   type AlarmJournalEntry,
   type AlarmPerformance,
 } from '../services/mesApi'
@@ -30,6 +31,7 @@ import { sensorSimulator } from '../services/sensorSimulator'
 import { AlarmStateBadge, PriorityBadge } from './AlarmBadges'
 import { AlarmPerformancePanel } from './AlarmPerformancePanel'
 import { AlarmTable } from './AlarmTable'
+import { FirstOutPanel } from './FirstOutPanel'
 
 /**
  * Trung tâm cảnh báo — ISA-18.2.
@@ -100,6 +102,7 @@ interface AlarmData {
   performance: AlarmPerformance | null
   journal: AlarmJournalEntry[]
   definitions: AlarmDefinitionRow[]
+  episodes: AlarmEpisodes | null
   error: string | null
 }
 
@@ -114,6 +117,10 @@ export function AlarmCenter() {
       : {
           performance: null,
           journal: [],
+          // First-out dung lai dien bien tu bang `alarm_transition`, nen khong
+          // co ban chay trong trinh duyet: engine offline khong giu lich su qua
+          // mot lan tai lai trang.
+          episodes: null,
           // Chạy ngoại tuyến thì cấu hình lấy từ engine trong trình duyệt; có
           // backend thì lấy từ bảng `alarm_definition`. Hai nơi sinh ra từ cùng
           // một công thức, nhưng vẽ bản suy ra lên màn hình trong khi hệ thống
@@ -135,10 +142,11 @@ export function AlarmCenter() {
         mesApi.alarmPerformance(PERFORMANCE_HOURS),
         mesApi.alarmJournal(JOURNAL_HOURS),
         mesApi.alarmDefinitions(),
+        mesApi.alarmEpisodes(JOURNAL_HOURS),
       ])
-        .then(([performance, journal, definitions]) => {
+        .then(([performance, journal, definitions, episodes]) => {
           if (!cancelled) {
-            setData({ performance, journal, definitions, error: null })
+            setData({ performance, journal, definitions, episodes, error: null })
           }
         })
         .catch((err: unknown) => {
@@ -149,6 +157,7 @@ export function AlarmCenter() {
             performance: prev?.performance ?? null,
             journal: prev?.journal ?? [],
             definitions: prev?.definitions ?? [],
+            episodes: prev?.episodes ?? null,
             error: err instanceof Error ? err.message : String(err),
           }))
         })
@@ -205,6 +214,12 @@ export function AlarmCenter() {
 
       <AlarmPerformancePanel
         data={data?.performance ?? null}
+        loading={loading}
+        error={data?.error ?? null}
+      />
+
+      <FirstOutPanel
+        data={data?.episodes ?? null}
         loading={loading}
         error={data?.error ?? null}
       />

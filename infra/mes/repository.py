@@ -395,8 +395,8 @@ async def journal_transitions(pool, transitions) -> None:
             """
             INSERT INTO alarm_transition
               (tag, asset_code, occurred_at, from_state, to_state, cause, priority,
-               alarm_class, message, value, unit, operator, note)
-            VALUES ($1,$2,to_timestamp($3),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+               alarm_class, message, value, unit, operator, note, on_delay_sec)
+            VALUES ($1,$2,to_timestamp($3),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             """,
             [
                 (
@@ -413,6 +413,7 @@ async def journal_transitions(pool, transitions) -> None:
                     t.unit,
                     t.operator,
                     t.note,
+                    float(t.on_delay_sec),
                 )
                 for t in transitions
             ],

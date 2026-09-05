@@ -4,7 +4,7 @@
 > cần thiết: dự án là gì, đã làm tới đâu, vì sao chọn cách đó, và việc tiếp theo
 > là gì. Đưa file này vào đầu chat mới là đủ để tiếp tục mà không phải kể lại.
 >
-> Cập nhật lần cuối: **2026-09-05** (đợt 8)
+> Cập nhật lần cuối: **2026-09-05** (đợt 9)
 
 ---
 
@@ -34,9 +34,9 @@ Ràng buộc: không gấp, làm vì đam mê, có một dự án khác đang ch
 | **Backend MES** | 🟢 **Thật** | FastAPI + asyncpg: work order, BOM, routing, genealogy hai chiều, truy vấn thu hồi theo lô |
 | **SCADA Command Center** | 🟡 Số liệu mô phỏng, **chạy ở server** | Một vòng tick duy nhất → historian → WebSocket cho mọi trình duyệt. Bộ đếm sản lượng trạm SMT lấy từ PLC thật khi gateway sống |
 | MES Traceability | 🟢 **Thật** | Đọc PostgreSQL; xuất CSV gồm cả lộ trình lẫn hệ phả vật tư |
-| **Quản lý cảnh báo** | 🟢 **Thật** | ANSI/ISA-18.2: máy trạng thái 7 trạng thái, deadband + on/off-delay, shelving có hạn, nhật ký kiểm toán, chỉ số hiệu năng theo điều 16. Đã đối chiếu trên TimescaleDB thật (đợt 8) |
+| **Quản lý cảnh báo** | 🟢 **Thật** | ANSI/ISA-18.2: máy trạng thái 7 trạng thái, deadband + on/off-delay, shelving có hạn, nhật ký kiểm toán, chỉ số hiệu năng theo điều 16, first-out + ma trận cause-and-effect. Đã đối chiếu trên TimescaleDB thật |
 | Digital Twin | 🟡 Mô phỏng | Đã tối ưu hiệu năng bằng rAF |
-| Kiểm thử | 🟢 **Có** | 211 test TypeScript + 120 test Python (MES) + 37 test Python (vision), tất cả đều xanh. Thêm một lần đối chiếu tay với DB thật ở đợt 8 |
+| Kiểm thử | 🟢 **Có** | 211 test TypeScript + 139 test Python (MES) + 37 test Python (vision), tất cả đều xanh. Thêm một lần đối chiếu tay với DB thật ở đợt 8 |
 
 ---
 
@@ -486,6 +486,97 @@ lệch nếu sau này ai đó so bằng dấu bằng.
 
 ---
 
+### 2026-09-05 — Đợt 9: First-out & cause-and-effect
+
+Khi dây chuyền đổ, cảnh báo không đến một cái — chúng đến thành chùm, màn hình
+đầy kín trong vài giây. Câu hỏi duy nhất đáng giá lúc đó không phải "đang có gì
+kêu" mà là **"cái nào kêu TRƯỚC"**. Bảng điều khiển lò hơi và tua-bin đã có mạch
+first-out chốt riêng cảnh báo đầu tiên từ những năm 1960 vì đúng lý do này.
+
+**Thứ tự kêu không phải thứ tự xảy ra, và sai lệch một cách có hệ thống.** Mỗi
+cảnh báo có on-delay riêng, nên một nguyên nhân chờ 30 giây sẽ kêu SAU một hậu
+quả chờ 6 giây. Đây không phải suy đoán — chính hệ thống này sinh ra hai ví dụ
+trong lúc kiểm chứng:
+
+```
+13:29:37  REFLOW-OVEN-02.TEMP.HIHI   (trễ  2s)  → khởi phát 13:29:35
+13:29:40  REFLOW-OVEN-02.TEMP.HI     (trễ  6s)  → khởi phát 13:29:34
+```
+
+HIHI kêu trước HI ba giây, trong khi về vật lý nhiệt độ **bắt buộc** phải vượt
+ngưỡng cảnh báo trước rồi mới tới ngưỡng tới hạn — `crit_temp > warn_temp`, không
+có đường nào khác. Đọc theo thứ tự kêu là chỉ sai thủ phạm.
+
+Ví dụ thứ hai còn rõ hơn. Đẩy tốc độ dây lên 2.9x:
+
+```
+13:31:45–46  bốn cảnh báo TEMP.HI   (trễ  6s)  → khởi phát 13:31:39–40
+13:31:55     bốn cảnh báo PWR.HI    (trễ 30s)  → khởi phát 13:31:25
+```
+
+Bốn cảnh báo công suất **kêu sau cùng nhưng khởi phát sớm nhất, trước nhiệt độ
+14 giây**. Và đó đúng là vật lý của mô hình: `load` bám tốc độ dây tức thì, còn
+nhiệt độ có quán tính. Màn hình đọc xuôi sẽ kể một câu chuyện ngược hẳn.
+
+Nên `on_delay_sec` được **chép vào từng dòng `alarm_transition`** (không join
+sang cấu hình — cùng lý do đã chép `priority`: hạ một độ trễ từ 6s xuống 2s thì
+mọi kết luận first-out trong quá khứ phải giữ nguyên), và mọi thứ xếp theo
+`onset = lúc kêu − độ trễ`.
+
+**Thời gian không chứng minh được nhân quả, nó chỉ loại trừ.** Bảng
+`alarm_causal_link` là tri thức kỹ thuật khai báo tay, và nó **cố tình chỉ có
+bốn dòng**: trong mô hình hiện tại chỉ có đúng một quan hệ nhân quả thật giữa
+hai cảnh báo (ngưỡng phân tầng HI → HIHI, mỗi máy một dòng). Nhiệt độ và công
+suất cùng tăng khi đẩy tốc độ, nhưng đó là **hai hậu quả của một nguyên nhân
+chung** chứ không phải cái này gây ra cái kia — khai báo `TEMP.HI → PWR.HI` sẽ
+là một dòng sai, và một ma trận C&E sai còn tệ hơn không có ma trận nào. Ghép
+đôi phải đủ cả ba điều kiện: có dòng khai báo, nguyên nhân không khởi phát sau
+hậu quả, và cách nhau trong `max_propagation_sec`.
+
+**Giới hạn phân giải, và quyền nói "không biết".** Thiết bị SOE công nghiệp luôn
+được bán kèm con số này (1 ms cho SOE đầu dây, 10–50 ms cho DCS). Ở đây nguồn sai
+số là nhịp tick 1.5 giây. Hai cảnh báo khởi phát cách nhau ít hơn một nhịp thì
+hệ thống **không phân định được**, và bừa một cái rồi trình bày như sự thật sẽ
+đẩy người vận hành đi sửa nhầm máy. Nên `firstOut.tiedWith` nêu tên những cái
+đồng hạng: bốn máy cùng ăn thêm điện trong một tick thì không máy nào "trước" cả,
+và cái được chọn chỉ thắng nhờ thứ tự chữ cái.
+
+**Ma trận C&E gỡ được thế bế tắc của đồng hồ.** Đây là chỗ hai cơ chế bù cho
+nhau, và nó lộ ra khi đọc kết quả thật: HI và HIHI khởi phát cách nhau 0.99 giây
+— dưới nhịp 1.5 giây, đồng hồ bó tay. Nhưng `crit_temp > warn_temp` là một *ràng
+buộc của cấp ngưỡng*, không phải một giả thiết, nên thứ tự vẫn xác định được.
+`confidenceBasis` phân biệt ba trường hợp: `TIMING` (đo được), `CAUSAL_MATRIX`
+(biết cơ chế), `NONE` (chịu). Bỏ đường thứ hai đi thì hệ thống sẽ nói "chưa
+chắc" ngay cả lúc nó biết chắc.
+
+**Nguyên nhân chung được nhận ra bằng cách không giải thích được.** Từ 3 cảnh
+báo trở lên không có quan hệ nào giải thích, trải trên từ 2 máy → hệ thống nói
+"đây không phải một chuỗi lan truyền" và gợi ý nhìn sang tốc độ dây / mật độ cấp
+liệu / nguồn / môi trường. Nó **không đoán** nguyên nhân — chỉ loại bỏ cách truy
+nguyên sai.
+
+**Thành phần**: `infra/db/init/06-first-out.sql` (viết idempotent, dùng được cả
+cho volume mới lẫn volume đã có — bài học của đợt 8), `infra/mes/first_out.py`
+(hàm thuần + truy vấn, tách như `alarm_metrics.py`), endpoint
+`/api/alarms/episodes`, và `FirstOutPanel.tsx` trong `/alarms`.
+
+**Kiểm chứng**: chạy đủ 6 file init trên một DB trắng, lái hai chuỗi thật qua
+WebSocket (một chuỗi nhân quả trên một máy, một nguyên nhân chung trên bốn máy),
+rồi đối chiếu endpoint và màn hình. Cả hai ra đúng như thiết kế: chuỗi một
+`CAUSAL_MATRIX` với HIHI ghi nhận là hậu quả của HI; chuỗi hai `NONE` với 3 cảnh
+báo đồng hạng, 7 không giải thích được, nghi nguyên nhân chung.
+
+**Kiểm thử**: 211 TypeScript + 139 Python (thêm `test_first_out.py` 19 ca — phần
+lớn là các cách kết luận sai, mỗi ca chặn một cách).
+
+**Còn nợ**: bản TypeScript chạy ngoại tuyến chưa có first-out. Khác với `isa18.ts`
+(máy trạng thái, phải có bản thứ hai để màn hình demo đúng là màn hình hệ thống
+sinh ra), first-out là phân tích trên **lịch sử**, mà engine trong trình duyệt
+không giữ lịch sử qua một lần tải lại trang. Panel nói thẳng là cần backend MES
+thay vì vẽ một bản suy ra.
+
+---
+
 ## 4. Quyết định đã chốt (đừng lật lại nếu không có lý do mới)
 
 - **Lệnh HMI ghi vào `%QX1.x`, không phải `%IX`.** Modbus master chỉ được ghi
@@ -633,8 +724,9 @@ Còn nợ nếu muốn đi sâu tiếp:
             với dữ liệu thật.
       - [ ] Alarm flood suppression: khi trên 10 cảnh báo ập đến trong 10 phút,
             gom theo nguyên nhân gốc thay vì đổ hết lên màn hình.
-      - [ ] First-out / cause-and-effect: cảnh báo nào kêu TRƯỚC trong một chuỗi
-            đổ dây chuyền — đó là câu hỏi thật sự khi truy nguyên nhân.
+      - [x] **First-out / cause-and-effect** — xong 2026-09-05 (đợt 9).
+            Xếp theo thời điểm khởi phát chứ không theo thời điểm kêu; ma trận
+            C&E khai báo tay; từ chối kết luận khi dưới giới hạn phân giải.
       - [ ] Cảnh báo từ AOI và từ PLC vào chung một máy trạng thái (hiện chỉ có
             4 máy trong bảng `asset`).
       - [ ] Đẩy cảnh báo lên MQTT theo Unified Namespace để Node-RED / Grafana
@@ -684,7 +776,7 @@ Chạy test:
 
 ```bash
 pnpm test                                    # 211 test TypeScript
-cd infra/mes  && pytest                      # 120 test backend MES
+cd infra/mes  && pytest                      # 139 test backend MES
 cd infra/vision && pytest                    # 37 test AOI
 ```
 

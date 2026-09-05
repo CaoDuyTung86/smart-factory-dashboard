@@ -586,11 +586,60 @@ WHERE state IN ('SHELVED', 'SUPPRESSED_BY_DESIGN', 'OUT_OF_SERVICE');
 > `alarm_transition` và `alarm_state` là bảng mới. Script trong `db/init/` chỉ
 > chạy trên volume rỗng, nên volume cũ phải xoá:
 > `docker compose -f infra/docker-compose.yml down -v` rồi `up -d`.
+>
+> Không muốn mất telemetry đang có thì áp tay hai file còn thiếu — backend sẽ nói
+> rõ thiếu bảng nào khi khởi động:
+>
+> ```bash
+> docker cp infra/db/init/05-alarms.sql smart-factory-timescaledb:/tmp/
+> docker exec smart-factory-timescaledb psql -U factory -d factory -f /tmp/05-alarms.sql
+> ```
+>
+> `06-first-out.sql` viết idempotent nên chạy được cả trên volume mới lẫn volume
+> đã có — dùng đúng hai lệnh trên, đổi tên file.
+
+## First-out & cause-and-effect
+
+Cảnh báo nào **khởi phát** trước trong một chuỗi đổ dây chuyền. Endpoint
+`/api/alarms/episodes`, màn hình nằm trong `/alarms`.
+
+Ba điều làm nên khác biệt giữa cái này và một danh sách sắp theo thời gian:
+
+- **Xếp theo `onset = lúc kêu − on_delay`, không theo lúc kêu.** Mỗi cảnh báo có
+  độ trễ bật riêng, nên thứ tự kêu sai lệch một cách có hệ thống. Ví dụ thật do
+  chính hệ thống này sinh ra: đẩy tốc độ dây lên 2.9x thì bốn cảnh báo `PWR.HI`
+  (trễ 30s) **kêu sau cùng nhưng khởi phát trước** bốn cảnh báo `TEMP.HI`
+  (trễ 6s) tới 14 giây — và đó đúng là vật lý: công suất bám tải tức thì, nhiệt
+  độ có quán tính. Vì vậy `on_delay_sec` được chép vào từng dòng
+  `alarm_transition` chứ không join sang cấu hình.
+- **Nhân quả phải khai báo trước, không suy từ thời gian.** Bảng
+  `alarm_causal_link` cố tình chỉ có bốn dòng: chỉ ngưỡng phân tầng HI → HIHI là
+  quan hệ nhân quả thật giữa hai cảnh báo trong mô hình này. Nhiệt độ và công
+  suất cùng tăng khi đẩy tốc độ, nhưng đó là hai hậu quả của một nguyên nhân
+  chung — một ma trận C&E sai còn tệ hơn không có.
+- **Có quyền nói "không biết".** Dưới giới hạn phân giải (nhịp tick) thì không
+  phân định được thứ tự; `tiedWith` nêu tên những cái đồng hạng. Nhưng khi quan
+  hệ nhân quả đã khai báo xác định được thứ tự mà đồng hồ không tách nổi thì
+  `confidenceBasis` ghi `CAUSAL_MATRIX` — chắc chắn vì biết cơ chế, khác với
+  chắc chắn vì đo được.
+
+```sql
+-- Ma trận cause-and-effect
+SELECT cause_tag, effect_tag, mechanism, max_propagation_sec
+FROM alarm_causal_link ORDER BY cause_tag;
+
+-- Dựng lại thứ tự khởi phát của một chuỗi
+SELECT tag, occurred_at,
+       occurred_at - make_interval(secs => on_delay_sec) AS onset
+FROM alarm_transition
+WHERE to_state = 'UNACK_ALM' AND occurred_at >= now() - INTERVAL '1 hour'
+ORDER BY onset;
+```
 
 ## Kiểm thử
 
 ```bash
-cd infra/mes && python -m pytest        # gồm test_alarms.py + test_alarm_metrics.py
+cd infra/mes && python -m pytest        # gồm test_alarms.py, test_alarm_metrics.py, test_first_out.py
 ```
 
 Máy trạng thái đi qua thời gian bằng tham số `now` chứ không bằng `sleep`, nên

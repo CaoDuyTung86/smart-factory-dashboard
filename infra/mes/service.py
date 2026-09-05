@@ -36,6 +36,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 import alarm_metrics
+import first_out
 import repository as repo
 from alarms import AlarmEngine, definition_from_row, restore as restore_alarms
 from historian import Historian, choose_resolution, fetch_history, fetch_series, utcnow
@@ -558,6 +559,20 @@ async def get_alarm_definitions() -> list[dict]:
 async def get_alarm_performance(hours: int = Query(24, ge=1, le=24 * 30)) -> JSONResponse:
     """Chi so hieu nang he canh bao theo ISA-18.2 dieu 16 / EEMUA 191."""
     return JSONResponse(json_safe(await alarm_metrics.fetch(rt.pool, hours)))
+
+
+@app.get("/api/alarms/episodes")
+async def get_alarm_episodes(hours: int = Query(8, ge=1, le=24 * 30)) -> JSONResponse:
+    """First-out: trong moi chum canh bao, cai nao KHOI PHAT truoc.
+
+    Do phan giai truyen vao la nhip tick, khong phai mot hang so dep. Mot thiet
+    bi SOE cong nghiep luon duoc ban kem con so nay, va o day nguon sai so la
+    chinh nhip tick: hai canh bao khoi phat cach nhau it hon mot tick thi he
+    thong nay khong phan dinh duoc thu tu, va phai noi ra dieu do.
+    """
+    return JSONResponse(
+        json_safe(await first_out.fetch(rt.pool, hours, resolution_sec=TICK_MS / 1000))
+    )
 
 
 @app.get("/api/alarms/journal")
