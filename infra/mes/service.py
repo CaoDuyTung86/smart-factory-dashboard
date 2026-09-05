@@ -351,6 +351,20 @@ async def build_alarm_engine(pool) -> AlarmEngine:
 
 async def startup() -> None:
     rt.pool = await connect_pool()
+
+    # Kiem schema TRUOC khi cham vao bat ky bang nao. Doi schema (nhu dot them
+    # ba bang canh bao) khong lam DB trong rong — no de lai mot DB con nguyen
+    # schema cu, va `db/init/` thi chi chay tren volume rong nen khong tu vao.
+    # Bao thang ra day, kem ca cach sua.
+    missing = await repo.missing_tables(rt.pool)
+    if missing:
+        raise RuntimeError(
+            "Thieu bang trong DB: "
+            + ", ".join(missing)
+            + ". Script db/init/ chi chay khi volume con rong, nen volume cu phai xoa: "
+            "docker compose -f infra/docker-compose.yml down -v && up -d"
+        )
+
     rows = await repo.load_shift_state(rt.pool)
     if not rows:
         raise RuntimeError("Bang asset/machine_shift_state rong — schema chua duoc nap")

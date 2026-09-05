@@ -16,6 +16,38 @@ def _rows(records) -> list[dict[str, Any]]:
     return [dict(r) for r in records]
 
 
+# Cac bang schema phai co truoc khi backend chay duoc. Danh sach nay la hop
+# dong giua `db/init/` va ma nguon: them mot bang bat buoc thi them vao day.
+REQUIRED_TABLES = (
+    "asset",
+    "machine_shift_state",
+    "telemetry",
+    "alarm_definition",
+    "alarm_transition",
+    "alarm_state",
+)
+
+
+async def missing_tables(pool, names=REQUIRED_TABLES) -> list[str]:
+    """Nhung bang trong `names` chua ton tai trong DB.
+
+    Script trong `db/init/` chi chay khi volume con rong, nen tinh huong hay
+    gap nhat khi doi schema khong phai la "DB trong" ma la "DB con nguyen
+    schema cu". Truoc day tinh huong do bao bang mot traceback asyncpg dai hai
+    muoi dong ket thuc bang `UndefinedTableError` — dung ve ky thuat nhung
+    khong noi cho nguoi doc biet phai lam gi. Kiem truoc mot lan de doi lay
+    mot cau bao ro rang.
+    """
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT tablename FROM pg_tables "
+            "WHERE schemaname = current_schema() AND tablename = ANY($1::text[])",
+            list(names),
+        )
+    have = {r["tablename"] for r in rows}
+    return [n for n in names if n not in have]
+
+
 # ---------------------------------------------------------------------------
 # Danh muc
 # ---------------------------------------------------------------------------
