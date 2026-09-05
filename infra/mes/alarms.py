@@ -182,6 +182,11 @@ class Transition:
     value: float | None = None
     unit: str = ""
     operator: str = ""
+    # Do tre bat DANG CO HIEU LUC luc dong nay duoc ghi. Chep vao day chu khong
+    # join sang cau hinh, cung ly do da chep `priority`: phan tich first-out
+    # phai tru dung do tre luc do, khong phai do tre hom nay. Xem
+    # `infra/mes/first_out.py`.
+    on_delay_sec: float = 0.0
     # Ly do thao tac, hien chi dung cho shelve. ISA-18.2 doi shelving phai la
     # mot quy trinh co kiem soat; mot lan shelve khong ghi ly do chinh la dinh
     # nghia cua "unauthorized alarm suppression" — va do la mot chi so phai
@@ -295,6 +300,7 @@ class AlarmEngine:
             unit=defn.unit,
             operator=operator,
             note=note,
+            on_delay_sec=defn.on_delay_sec,
         )
         rt.state = to_state
         return tx

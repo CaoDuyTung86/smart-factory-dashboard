@@ -4,7 +4,7 @@
 > cần thiết: dự án là gì, đã làm tới đâu, vì sao chọn cách đó, và việc tiếp theo
 > là gì. Đưa file này vào đầu chat mới là đủ để tiếp tục mà không phải kể lại.
 >
-> Cập nhật lần cuối: **2026-09-04** (đợt 7)
+> Cập nhật lần cuối: **2026-09-05** (đợt 9)
 
 ---
 
@@ -34,9 +34,9 @@ Ràng buộc: không gấp, làm vì đam mê, có một dự án khác đang ch
 | **Backend MES** | 🟢 **Thật** | FastAPI + asyncpg: work order, BOM, routing, genealogy hai chiều, truy vấn thu hồi theo lô |
 | **SCADA Command Center** | 🟡 Số liệu mô phỏng, **chạy ở server** | Một vòng tick duy nhất → historian → WebSocket cho mọi trình duyệt. Bộ đếm sản lượng trạm SMT lấy từ PLC thật khi gateway sống |
 | MES Traceability | 🟢 **Thật** | Đọc PostgreSQL; xuất CSV gồm cả lộ trình lẫn hệ phả vật tư |
-| **Quản lý cảnh báo** | 🟢 **Thật** | ANSI/ISA-18.2: máy trạng thái 7 trạng thái, deadband + on/off-delay, shelving có hạn, nhật ký kiểm toán, chỉ số hiệu năng theo điều 16 |
+| **Quản lý cảnh báo** | 🟢 **Thật** | ANSI/ISA-18.2: máy trạng thái 7 trạng thái, deadband + on/off-delay, shelving có hạn, nhật ký kiểm toán, chỉ số hiệu năng theo điều 16, first-out + ma trận cause-and-effect. Đã đối chiếu trên TimescaleDB thật |
 | Digital Twin | 🟡 Mô phỏng | Đã tối ưu hiệu năng bằng rAF |
-| Kiểm thử | 🟢 **Có** | 211 test TypeScript + 116 test Python (MES) + 37 test Python (vision), tất cả đều xanh |
+| Kiểm thử | 🟢 **Có** | 211 test TypeScript + 139 test Python (MES) + 37 test Python (vision), tất cả đều xanh. Thêm một lần đối chiếu tay với DB thật ở đợt 8 |
 
 ---
 
@@ -399,13 +399,181 @@ màn hình chính sang danh sách "Đang bị tắt tiếng" kèm lý do và m�
 trong lúc đó `TEMP.HI` (ngưỡng thấp hơn) kêu lên đúng như thiết kế phân tầng
 HI/HIHI.
 
-**Chưa kiểm chứng**: schema SQL và các truy vấn KPI mới **chưa chạy trên
-TimescaleDB thật** — Docker Desktop không lên trong phiên làm việc này. Đã kiểm
-cú pháp toàn bộ bằng `pglast` (bọc chính parser của PostgreSQL): 5 file init +
-19 truy vấn trong Python đều parse sạch. Còn thiếu phần ngữ nghĩa (tên cột khi
-join, kiểu tham số asyncpg) — việc đầu tiên của phiên sau là
-`docker compose -f infra/docker-compose.yml down -v && up -d` rồi đối chiếu
-`/api/alarms/performance`.
+**Phần chưa kiểm chứng của đợt này (schema SQL và các truy vấn KPI mới chỉ
+mới kiểm được cú pháp bằng `pglast`) đã được chạy trên TimescaleDB thật ở đợt 8
+— xem bên dưới.**
+
+---
+
+### 2026-09-05 — Đợt 8: Đối chiếu hệ cảnh báo với TimescaleDB thật
+
+Đợt 7 dừng lại ở chỗ `pglast` chỉ chứng minh được **cú pháp**. Đợt này chạy
+thật, và chạy theo cách không đụng vào volume `factory` đang có dữ liệu: dựng
+một database trắng `verify_alarms` trong chính container TimescaleDB rồi chạy
+đủ 5 file `db/init/` theo đúng thứ tự entrypoint. Cách này kiểm được thêm một
+thứ mà `down -v` không kiểm: rằng **các script init chạy sạch từ số 0**, đúng
+đường mà một máy mới sẽ đi.
+
+- 5 file init: chạy sạch, không một cảnh báo. `alarm_definition` sinh ra đúng
+  20 dòng (4 tài sản × 5 định nghĩa) từ chính bảng `asset`.
+- Ràng buộc `alarm_safety_khong_duoc_tre` đứng vững: cả 4 cảnh báo SAFETY đều
+  có `on_delay_sec = 0` sau khi sinh.
+
+**Số 0 không chứng minh được gì.** `/api/alarms/performance` lần chạy đầu trả
+HTTP 200 với toàn số 0 — chỉ đủ nói rằng SQL parse và plan được, chưa nói gì về
+phần đọc cột hay logic cửa sổ. Nên bơm một nhật ký giả dựng riêng để ép chạy
+hết các nhánh, mỗi dòng nhắm một khẳng định của đợt 7:
+
+| Tình huống dựng                              | Điều cần chứng minh                             | Kết quả |
+| -------------------------------------------- | ----------------------------------------------- | ------- |
+| 3 lần kêu lúc `:59` / `:60` / `:61`           | cửa sổ TRƯỢT 60s bắt được, cắt khúc theo phút thì không | `maxPerMinute: 3` ✅ |
+| Cùng một tag kêu 2 lần, ACK sau 45s và sau 5s | view `alarm_occurrence` gán ACK đúng lần kêu    | median 25.0 / p90 41.0 ✅ |
+| Shelve ghi `'   '` (toàn khoảng trắng)        | `btrim(note) = ''` tính là không ghi lý do      | `shelvesWithoutReason: 1` ✅ |
+| Tag `LEGACY-WAVE-09` không có trong cấu hình  | nhật ký kiểm toán sống sót khi cảnh báo bị gỡ   | vẫn vào KPI ✅ |
+| `raised_at` cách đây 30 giờ                   | truy vấn stale + `numeric → float`              | `hours: 30.0` ✅ |
+
+Con số ack đáng nói riêng: hai lần ACK là 45 giây và 5 giây, ra median 25.0 và
+p90 41.0 — tức là view đã gán 5 giây cho **lần kêu thứ hai** chứ không gộp vào
+lần đầu. Đó chính là cái bẫy `lead()` trong view được viết ra để tránh, và giờ
+có bằng chứng chứ không còn là lập luận.
+
+**Đường ghi thì phải lái mới biết.** Đọc bao nhiêu endpoint cũng không chứng
+minh được engine ghi xuống DB. Nên lái một vòng đời thật qua WebSocket:
+E-Stop (SAFETY, on-delay 0) → kêu ngay ở tick kế tiếp; quá nhiệt (on-delay 2s)
+→ chờ hết trễ mới kêu, và kêu phân tầng đúng HIHI trước rồi HI sau; ACK; shelve
+không ghi lý do; repair. Sáu dòng `alarm_transition` hiện ra đúng thứ tự, đúng
+`operator`, đúng `from_state -> to_state`.
+
+Rồi `docker restart`: cảnh báo SHELVED quay lại **kèm nguyên hạn tự bật lại**,
+cảnh báo UNACK quay lại **kèm nguyên `raisedAt` cũ**. Đó là toàn bộ lý do tồn
+tại của bảng `alarm_state`, và tới đợt này nó mới thực sự được chứng minh.
+
+**Một lỗi thật tìm được, và nó nằm ở chỗ không ai kiểm.** Thử đúng tình huống
+của một người đã chạy stack từ trước đợt 7: volume cũ không có ba bảng cảnh
+báo, vì `db/init/` chỉ chạy khi volume còn rỗng. Backend chết bằng traceback
+asyncpg 25 dòng kết thúc bằng `UndefinedTableError: relation "alarm_definition"
+does not exist` — đúng về kỹ thuật, vô dụng với người đọc.
+
+Code đã có sẵn một guard đẹp cho trường hợp **bảng rỗng**
+(`"Bang alarm_definition rong — schema chua duoc nap"`) nhưng không có cho
+trường hợp **bảng không tồn tại** — mà đổi schema thì hầu như luôn rơi vào vế
+sau chứ không phải vế trước. Thêm `repository.missing_tables()` và một lần kiểm
+ở đầu `startup()`, trước khi chạm vào bất kỳ bảng nào:
+
+```
+RuntimeError: Thieu bang trong DB: alarm_definition, alarm_transition,
+alarm_state. Script db/init/ chi chay khi volume con rong, nen volume cu phai
+xoa: docker compose -f infra/docker-compose.yml down -v && up -d
+```
+
+`REQUIRED_TABLES` là hợp đồng giữa `db/init/` và mã nguồn: thêm một bảng bắt
+buộc thì thêm vào đó một dòng.
+
+**Không phải lỗi, đã kiểm rồi loại:**
+
+- `alarm_state` có lúc trống trơn trong khi engine đang giữ một cảnh báo
+  SHELVED — hoá ra chỉ là tra trước nhịp lưu kế tiếp (`STATE_SAVE_EVERY = 20`
+  tick × 1.5s = 30 giây). Tra lại sau đó thì DB khớp engine từng dòng.
+- `message` hiện ra `SMT � do rung` — kiểm bytes thì là `â`, tức
+  em-dash UTF-8 đúng chuẩn; chỉ là console Windows không vẽ được.
+
+**Kiểm thử**: 211 test TypeScript + 120 test Python (thêm `test_repository.py`
+4 ca cho guard mới), tất cả xanh.
+
+**Còn nợ**: `topTenPct` cộng từ các phần trăm đã làm tròn nên ra 99.99 thay vì
+100 khi chỉ có vài tag. Vô hại với ngưỡng 5% đang dùng, nhưng là một con số hơi
+lệch nếu sau này ai đó so bằng dấu bằng.
+
+---
+
+### 2026-09-05 — Đợt 9: First-out & cause-and-effect
+
+Khi dây chuyền đổ, cảnh báo không đến một cái — chúng đến thành chùm, màn hình
+đầy kín trong vài giây. Câu hỏi duy nhất đáng giá lúc đó không phải "đang có gì
+kêu" mà là **"cái nào kêu TRƯỚC"**. Bảng điều khiển lò hơi và tua-bin đã có mạch
+first-out chốt riêng cảnh báo đầu tiên từ những năm 1960 vì đúng lý do này.
+
+**Thứ tự kêu không phải thứ tự xảy ra, và sai lệch một cách có hệ thống.** Mỗi
+cảnh báo có on-delay riêng, nên một nguyên nhân chờ 30 giây sẽ kêu SAU một hậu
+quả chờ 6 giây. Đây không phải suy đoán — chính hệ thống này sinh ra hai ví dụ
+trong lúc kiểm chứng:
+
+```
+13:29:37  REFLOW-OVEN-02.TEMP.HIHI   (trễ  2s)  → khởi phát 13:29:35
+13:29:40  REFLOW-OVEN-02.TEMP.HI     (trễ  6s)  → khởi phát 13:29:34
+```
+
+HIHI kêu trước HI ba giây, trong khi về vật lý nhiệt độ **bắt buộc** phải vượt
+ngưỡng cảnh báo trước rồi mới tới ngưỡng tới hạn — `crit_temp > warn_temp`, không
+có đường nào khác. Đọc theo thứ tự kêu là chỉ sai thủ phạm.
+
+Ví dụ thứ hai còn rõ hơn. Đẩy tốc độ dây lên 2.9x:
+
+```
+13:31:45–46  bốn cảnh báo TEMP.HI   (trễ  6s)  → khởi phát 13:31:39–40
+13:31:55     bốn cảnh báo PWR.HI    (trễ 30s)  → khởi phát 13:31:25
+```
+
+Bốn cảnh báo công suất **kêu sau cùng nhưng khởi phát sớm nhất, trước nhiệt độ
+14 giây**. Và đó đúng là vật lý của mô hình: `load` bám tốc độ dây tức thì, còn
+nhiệt độ có quán tính. Màn hình đọc xuôi sẽ kể một câu chuyện ngược hẳn.
+
+Nên `on_delay_sec` được **chép vào từng dòng `alarm_transition`** (không join
+sang cấu hình — cùng lý do đã chép `priority`: hạ một độ trễ từ 6s xuống 2s thì
+mọi kết luận first-out trong quá khứ phải giữ nguyên), và mọi thứ xếp theo
+`onset = lúc kêu − độ trễ`.
+
+**Thời gian không chứng minh được nhân quả, nó chỉ loại trừ.** Bảng
+`alarm_causal_link` là tri thức kỹ thuật khai báo tay, và nó **cố tình chỉ có
+bốn dòng**: trong mô hình hiện tại chỉ có đúng một quan hệ nhân quả thật giữa
+hai cảnh báo (ngưỡng phân tầng HI → HIHI, mỗi máy một dòng). Nhiệt độ và công
+suất cùng tăng khi đẩy tốc độ, nhưng đó là **hai hậu quả của một nguyên nhân
+chung** chứ không phải cái này gây ra cái kia — khai báo `TEMP.HI → PWR.HI` sẽ
+là một dòng sai, và một ma trận C&E sai còn tệ hơn không có ma trận nào. Ghép
+đôi phải đủ cả ba điều kiện: có dòng khai báo, nguyên nhân không khởi phát sau
+hậu quả, và cách nhau trong `max_propagation_sec`.
+
+**Giới hạn phân giải, và quyền nói "không biết".** Thiết bị SOE công nghiệp luôn
+được bán kèm con số này (1 ms cho SOE đầu dây, 10–50 ms cho DCS). Ở đây nguồn sai
+số là nhịp tick 1.5 giây. Hai cảnh báo khởi phát cách nhau ít hơn một nhịp thì
+hệ thống **không phân định được**, và bừa một cái rồi trình bày như sự thật sẽ
+đẩy người vận hành đi sửa nhầm máy. Nên `firstOut.tiedWith` nêu tên những cái
+đồng hạng: bốn máy cùng ăn thêm điện trong một tick thì không máy nào "trước" cả,
+và cái được chọn chỉ thắng nhờ thứ tự chữ cái.
+
+**Ma trận C&E gỡ được thế bế tắc của đồng hồ.** Đây là chỗ hai cơ chế bù cho
+nhau, và nó lộ ra khi đọc kết quả thật: HI và HIHI khởi phát cách nhau 0.99 giây
+— dưới nhịp 1.5 giây, đồng hồ bó tay. Nhưng `crit_temp > warn_temp` là một *ràng
+buộc của cấp ngưỡng*, không phải một giả thiết, nên thứ tự vẫn xác định được.
+`confidenceBasis` phân biệt ba trường hợp: `TIMING` (đo được), `CAUSAL_MATRIX`
+(biết cơ chế), `NONE` (chịu). Bỏ đường thứ hai đi thì hệ thống sẽ nói "chưa
+chắc" ngay cả lúc nó biết chắc.
+
+**Nguyên nhân chung được nhận ra bằng cách không giải thích được.** Từ 3 cảnh
+báo trở lên không có quan hệ nào giải thích, trải trên từ 2 máy → hệ thống nói
+"đây không phải một chuỗi lan truyền" và gợi ý nhìn sang tốc độ dây / mật độ cấp
+liệu / nguồn / môi trường. Nó **không đoán** nguyên nhân — chỉ loại bỏ cách truy
+nguyên sai.
+
+**Thành phần**: `infra/db/init/06-first-out.sql` (viết idempotent, dùng được cả
+cho volume mới lẫn volume đã có — bài học của đợt 8), `infra/mes/first_out.py`
+(hàm thuần + truy vấn, tách như `alarm_metrics.py`), endpoint
+`/api/alarms/episodes`, và `FirstOutPanel.tsx` trong `/alarms`.
+
+**Kiểm chứng**: chạy đủ 6 file init trên một DB trắng, lái hai chuỗi thật qua
+WebSocket (một chuỗi nhân quả trên một máy, một nguyên nhân chung trên bốn máy),
+rồi đối chiếu endpoint và màn hình. Cả hai ra đúng như thiết kế: chuỗi một
+`CAUSAL_MATRIX` với HIHI ghi nhận là hậu quả của HI; chuỗi hai `NONE` với 3 cảnh
+báo đồng hạng, 7 không giải thích được, nghi nguyên nhân chung.
+
+**Kiểm thử**: 211 TypeScript + 139 Python (thêm `test_first_out.py` 19 ca — phần
+lớn là các cách kết luận sai, mỗi ca chặn một cách).
+
+**Còn nợ**: bản TypeScript chạy ngoại tuyến chưa có first-out. Khác với `isa18.ts`
+(máy trạng thái, phải có bản thứ hai để màn hình demo đúng là màn hình hệ thống
+sinh ra), first-out là phân tích trên **lịch sử**, mà engine trong trình duyệt
+không giữ lịch sử qua một lần tải lại trang. Panel nói thẳng là cần backend MES
+thay vì vẽ một bản suy ra.
 
 ---
 
@@ -550,13 +718,15 @@ Còn nợ nếu muốn đi sâu tiếp:
 ### Ưu tiên 4 — Phần "kỹ sư", chọn 1–2 cái làm sâu
 
 - [x] **Alarm theo ISA-18.2** — xong 2026-09-04 (đợt 7). Còn nợ nếu muốn đi sâu:
-      - [ ] **Chạy thử trên TimescaleDB thật.** Schema và các truy vấn KPI mới
-            mới chỉ kiểm được cú pháp bằng `pglast`, chưa chạy trên DB thật.
-            Đây là việc đầu tiên của phiên sau.
+      - [x] **Chạy thử trên TimescaleDB thật** — xong 2026-09-05 (đợt 8).
+            5 file init chạy sạch trên DB trắng; cả 7 truy vấn KPI, view
+            `alarm_occurrence` và đường ghi/khôi phục trạng thái đã đối chiếu
+            với dữ liệu thật.
       - [ ] Alarm flood suppression: khi trên 10 cảnh báo ập đến trong 10 phút,
             gom theo nguyên nhân gốc thay vì đổ hết lên màn hình.
-      - [ ] First-out / cause-and-effect: cảnh báo nào kêu TRƯỚC trong một chuỗi
-            đổ dây chuyền — đó là câu hỏi thật sự khi truy nguyên nhân.
+      - [x] **First-out / cause-and-effect** — xong 2026-09-05 (đợt 9).
+            Xếp theo thời điểm khởi phát chứ không theo thời điểm kêu; ma trận
+            C&E khai báo tay; từ chối kết luận khi dưới giới hạn phân giải.
       - [ ] Cảnh báo từ AOI và từ PLC vào chung một máy trạng thái (hiện chỉ có
             4 máy trong bảng `asset`).
       - [ ] Đẩy cảnh báo lên MQTT theo Unified Namespace để Node-RED / Grafana
@@ -605,8 +775,8 @@ curl "http://127.0.0.1:8002/api/lots/LOT-CAP-2609-B/impact"
 Chạy test:
 
 ```bash
-pnpm test                                    # 171 test TypeScript
-cd infra/mes  && pytest                      # 54 test backend MES
+pnpm test                                    # 211 test TypeScript
+cd infra/mes  && pytest                      # 139 test backend MES
 cd infra/vision && pytest                    # 37 test AOI
 ```
 

@@ -291,6 +291,75 @@ export interface AlarmJournalEntry {
   note: string
 }
 
+/**
+ * Một chuỗi cảnh báo, và cảnh báo nào KHỞI PHÁT trước trong chuỗi đó.
+ *
+ * Mọi thứ ở đây xếp theo `onsetAt` (lúc kêu trừ đi on-delay) chứ không theo
+ * `annunciatedAt`. Hai thứ đó khác nhau, và khác một cách có hệ thống: mỗi cảnh
+ * báo có độ trễ bật riêng, nên một nguyên nhân chờ 30 giây sẽ kêu SAU một hậu
+ * quả chờ 6 giây. Đọc màn hình theo thứ tự kêu sẽ chỉ sai thủ phạm.
+ */
+export interface AlarmEpisodeMember {
+  tag: string
+  assetCode: string
+  priority: string
+  message: string
+  annunciatedAt: number
+  onsetAt: number
+  onDelaySec: number
+  /** Giây kể từ lúc cảnh báo đầu tiên của chuỗi khởi phát. */
+  offsetSec: number
+  rankByOnset: number
+  rankByAnnunciation: number
+  /** Chỉ có khi ma trận cause-and-effect khai báo sẵn quan hệ này. */
+  explainedBy: {
+    causeTag: string
+    mechanism: string
+    note: string
+    lagSec: number
+  } | null
+}
+
+export interface AlarmEpisode {
+  startedAt: number
+  endedAt: number
+  count: number
+  assets: string[]
+  firstOut: {
+    tag: string
+    assetCode: string
+    priority: string
+    message: string
+    onsetAt: number
+    annunciatedAt: number
+    /** Rỗng khi phân định được. Không rỗng nghĩa là "một trong những cái này". */
+    tiedWith: string[]
+  }
+  /** Giới hạn phân giải của hệ, lấy từ nhịp tick. */
+  resolutionSec: number
+  separationSec: number | null
+  /** false = đồng hồ không tách nổi VÀ ma trận C&E cũng không gỡ được. */
+  confident: boolean
+  /**
+   * Phân định nhờ đâu. `CAUSAL_MATRIX` là trường hợp đáng chú ý: đồng hồ bó tay
+   * nhưng quan hệ nhân quả đã khai báo vẫn xác định được thứ tự.
+   */
+  confidenceBasis: 'TIMING' | 'CAUSAL_MATRIX' | 'NONE'
+  /** Các tag mà thứ tự khởi phát khác thứ tự kêu. */
+  reorderedByDelay: string[]
+  members: AlarmEpisodeMember[]
+  unexplained: number
+  suspectedCommonCause: boolean
+}
+
+export interface AlarmEpisodes {
+  windowHours: number
+  resolutionSec: number
+  quietGapSec: number
+  linkCount: number
+  episodes: AlarmEpisode[]
+}
+
 export interface TelemetryHistory {
   /** 'raw' | '1m' | '1h' — backend tự chọn theo độ dài khoảng thời gian. */
   resolution: string
@@ -323,4 +392,6 @@ export const mesApi = {
     request<AlarmJournalEntry[]>(
       '/api/alarms/journal?hours=' + hours + '&limit=' + limit
     ),
+  alarmEpisodes: (hours: number) =>
+    request<AlarmEpisodes>('/api/alarms/episodes?hours=' + hours),
 }
